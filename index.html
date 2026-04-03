@@ -1,0 +1,970 @@
+<!DOCTYPE html>
+<html lang="uz">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Timgo Taxi Taximeter</title>
+    <script src="https://telegram.org/js/telegram-web-app.js"></script>
+    <link href="https://cdn.jsdelivr.net/npm/maplibre-gl@3.6.2/dist/maplibre-gl.css" rel="stylesheet"/>
+    
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        :root {
+            --primary: #248bcf;
+            --success: #10b981;
+            --danger: #ef4444;
+            --warning: #f59e0b;
+            --dark: #0a0e27;
+            --gold: #fbbf24;
+            --purple: #8b5cf6;
+        }
+        
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
+            background: var(--dark);
+            color: #fff;
+            overflow: hidden;
+            height: 100vh;
+            display: flex;
+            flex-direction: column;
+        }
+        
+        /* LOADING SCREEN */
+        .loading-screen {
+            position: fixed;
+            inset: 0;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            z-index: 9999;
+            transition: opacity 0.5s, visibility 0.5s;
+        }
+        
+        .loading-screen.hidden {
+            opacity: 0;
+            visibility: hidden;
+        }
+        
+        .spinner-wrapper {
+            position: relative;
+            width: 100px;
+            height: 100px;
+        }
+        
+        .spinner {
+            position: absolute;
+            width: 100%;
+            height: 100%;
+            border: 5px solid rgba(255, 255, 255, 0.2);
+            border-top: 5px solid #fff;
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+        }
+        
+        .spinner-inner {
+            position: absolute;
+            top: 10px;
+            left: 10px;
+            right: 10px;
+            bottom: 10px;
+            border: 5px solid rgba(255, 255, 255, 0.3);
+            border-bottom: 5px solid var(--gold);
+            border-radius: 50%;
+            animation: spin 1.5s linear infinite reverse;
+        }
+        
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+        
+        .loading-text {
+            margin-top: 30px;
+            font-size: 18px;
+            font-weight: 600;
+            color: #fff;
+            animation: pulse 1.5s ease-in-out infinite;
+        }
+        
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.5; }
+        }
+        
+        /* MAP */
+        #map {
+            flex: 1;
+            width: 100%;
+            position: relative;
+            z-index: 1;
+            transition: all 0.6s cubic-bezier(0.4, 0, 0.2, 1);
+        }
+        
+        #map.minimized {
+            flex: 0.35;
+            filter: brightness(0.7);
+        }
+        
+        /* TOP BAR */
+        .top-bar {
+            position: absolute;
+            top: 20px;
+            left: 20px;
+            right: 20px;
+            background: rgba(10, 14, 39, 0.95);
+            backdrop-filter: blur(30px);
+            border-radius: 24px;
+            padding: 20px;
+            box-shadow: 0 10px 50px rgba(0, 0, 0, 0.5);
+            z-index: 1000;
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            animation: slideDown 0.6s ease-out;
+        }
+        
+        @keyframes slideDown {
+            from {
+                transform: translateY(-100px);
+                opacity: 0;
+            }
+            to {
+                transform: translateY(0);
+                opacity: 1;
+            }
+        }
+        
+        .top-bar-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 15px;
+        }
+        
+        .order-badge {
+            font-size: 12px;
+            color: #94a3b8;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+        }
+        
+        .order-number {
+            color: var(--primary);
+            font-weight: 700;
+        }
+        
+        .status-badge {
+            padding: 8px 16px;
+            border-radius: 20px;
+            font-size: 12px;
+            font-weight: 700;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            animation: statusPulse 2s infinite;
+        }
+        
+        @keyframes statusPulse {
+            0%, 100% { opacity: 1; transform: scale(1); }
+            50% { opacity: 0.8; transform: scale(1.05); }
+        }
+        
+        .status-enroute {
+            background: rgba(251, 191, 36, 0.2);
+            color: #fbbf24;
+            border: 2px solid #fbbf24;
+        }
+        
+        .status-arrived {
+            background: rgba(34, 197, 94, 0.2);
+            color: #22c55e;
+            border: 2px solid #22c55e;
+        }
+        
+        .status-ongoing {
+            background: rgba(139, 92, 246, 0.2);
+            color: #8b5cf6;
+            border: 2px solid #8b5cf6;
+        }
+        
+        .customer-info {
+            display: flex;
+            align-items: center;
+            gap: 14px;
+            padding: 16px;
+            background: rgba(30, 41, 59, 0.6);
+            border-radius: 18px;
+            border: 1px solid rgba(255, 255, 255, 0.05);
+        }
+        
+        .avatar {
+            width: 52px;
+            height: 52px;
+            border-radius: 50%;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 28px;
+            flex-shrink: 0;
+            box-shadow: 0 6px 20px rgba(102, 126, 234, 0.4);
+        }
+        
+        .customer-details {
+            flex: 1;
+        }
+        
+        .customer-name {
+            font-size: 18px;
+            font-weight: 700;
+            color: #fff;
+            margin-bottom: 5px;
+        }
+        
+        .customer-phone {
+            font-size: 14px;
+            color: #94a3b8;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+        
+        /* TAXIMETER PANEL */
+        .taximeter-container {
+            display: none;
+            background: linear-gradient(180deg, #1e293b 0%, #0f172a 100%);
+            padding: 30px 24px;
+            text-align: center;
+            border-top: 4px solid var(--gold);
+            box-shadow: 0 -10px 50px rgba(0, 0, 0, 0.5);
+            animation: slideUpTaximeter 0.8s cubic-bezier(0.4, 0, 0.2, 1);
+            position: relative;
+            overflow: hidden;
+        }
+        
+        .taximeter-container::before {
+            content: '';
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            height: 4px;
+            background: linear-gradient(90deg, 
+                var(--gold) 0%, 
+                var(--warning) 50%, 
+                var(--gold) 100%);
+            animation: shimmer 2s infinite;
+        }
+        
+        @keyframes shimmer {
+            0% { background-position: -100% 0; }
+            100% { background-position: 200% 0; }
+        }
+        
+        @keyframes slideUpTaximeter {
+            from {
+                transform: translateY(100%);
+                opacity: 0;
+            }
+            to {
+                transform: translateY(0);
+                opacity: 1;
+            }
+        }
+        
+        .meter-label {
+            font-size: 13px;
+            color: #64748b;
+            text-transform: uppercase;
+            letter-spacing: 2px;
+            margin-bottom: 12px;
+            font-weight: 600;
+        }
+        
+        .price-display {
+            font-size: 72px;
+            font-weight: 900;
+            color: var(--gold);
+            letter-spacing: -3px;
+            line-height: 1;
+            margin-bottom: 8px;
+            text-shadow: 0 4px 20px rgba(251, 191, 36, 0.3);
+            animation: priceGlow 2s infinite;
+        }
+        
+        @keyframes priceGlow {
+            0%, 100% { text-shadow: 0 4px 20px rgba(251, 191, 36, 0.3); }
+            50% { text-shadow: 0 4px 30px rgba(251, 191, 36, 0.6); }
+        }
+        
+        .currency {
+            font-size: 14px;
+            color: #94a3b8;
+            font-weight: 600;
+            letter-spacing: 1px;
+        }
+        
+        .stats-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 16px;
+            margin: 28px 0 0;
+            padding-top: 24px;
+            border-top: 1px solid rgba(255, 255, 255, 0.08);
+        }
+        
+        .stat-box {
+            background: rgba(30, 41, 59, 0.5);
+            padding: 18px;
+            border-radius: 16px;
+            border: 1px solid rgba(255, 255, 255, 0.05);
+        }
+        
+        .stat-label {
+            font-size: 11px;
+            color: #64748b;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            margin-bottom: 8px;
+            font-weight: 600;
+        }
+        
+        .stat-value {
+            font-size: 28px;
+            font-weight: 800;
+            color: #fff;
+        }
+        
+        .stat-icon {
+            font-size: 20px;
+            margin-bottom: 6px;
+        }
+        
+        /* BOTTOM PANEL */
+        .bottom-panel {
+            background: linear-gradient(180deg, #1e293b 0%, #0f172a 100%);
+            padding: 28px 24px 36px;
+            border-top-left-radius: 32px;
+            border-top-right-radius: 32px;
+            box-shadow: 0 -10px 50px rgba(0, 0, 0, 0.5);
+            z-index: 1000;
+            animation: slideUp 0.6s ease-out;
+        }
+        
+        @keyframes slideUp {
+            from {
+                transform: translateY(100%);
+                opacity: 0;
+            }
+            to {
+                transform: translateY(0);
+                opacity: 1;
+            }
+        }
+        
+        .panel-handle {
+            width: 48px;
+            height: 5px;
+            background: rgba(255, 255, 255, 0.2);
+            border-radius: 3px;
+            margin: 0 auto 24px;
+        }
+        
+        .action-btn {
+            width: 100%;
+            padding: 20px;
+            border: none;
+            border-radius: 18px;
+            font-size: 17px;
+            font-weight: 800;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 12px;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            box-shadow: 0 8px 30px rgba(0, 0, 0, 0.4);
+            transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+            position: relative;
+            overflow: hidden;
+        }
+        
+        .action-btn::before {
+            content: '';
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            width: 0;
+            height: 0;
+            border-radius: 50%;
+            background: rgba(255, 255, 255, 0.2);
+            transform: translate(-50%, -50%);
+            transition: width 0.6s, height 0.6s;
+        }
+        
+        .action-btn:active::before {
+            width: 300px;
+            height: 300px;
+        }
+        
+        .action-btn:active {
+            transform: scale(0.97);
+        }
+        
+        .btn-primary {
+            background: linear-gradient(135deg, var(--primary) 0%, #1e40af 100%);
+            color: white;
+        }
+        
+        .btn-success {
+            background: linear-gradient(135deg, var(--success) 0%, #059669 100%);
+            color: white;
+        }
+        
+        .btn-danger {
+            background: linear-gradient(135deg, var(--danger) 0%, #dc2626 100%);
+            color: white;
+        }
+        
+        .btn-icon {
+            font-size: 24px;
+            z-index: 1;
+        }
+        
+        .btn-text {
+            z-index: 1;
+        }
+        
+        /* CUSTOM MAP MARKERS */
+        .driver-marker {
+            width: 50px;
+            height: 50px;
+            border-radius: 50%;
+            background: linear-gradient(135deg, var(--success) 0%, #059669 100%);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 28px;
+            border: 4px solid white;
+            box-shadow: 0 8px 30px rgba(16, 185, 129, 0.5);
+            animation: markerPulse 2s infinite;
+        }
+        
+        @keyframes markerPulse {
+            0%, 100% { transform: scale(1); }
+            50% { transform: scale(1.1); }
+        }
+        
+        .customer-marker {
+            width: 50px;
+            height: 50px;
+            border-radius: 50%;
+            background: linear-gradient(135deg, var(--primary) 0%, #1e40af 100%);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 28px;
+            border: 4px solid white;
+            box-shadow: 0 8px 30px rgba(36, 139, 207, 0.5);
+        }
+        
+        /* HIDE LEAFLET ROUTING CONTROLS */
+        .leaflet-routing-container {
+            display: none !important;
+        }
+        
+        /* RESPONSIVE */
+        @media (max-width: 380px) {
+            .price-display {
+                font-size: 60px;
+            }
+            
+            .stat-value {
+                font-size: 24px;
+            }
+            
+            .action-btn {
+                padding: 18px;
+                font-size: 15px;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="loading-screen" id="loadingScreen">
+        <div class="spinner-wrapper">
+            <div class="spinner"></div>
+            <div class="spinner-inner"></div>
+        </div>
+        <div class="loading-text">Ma'lumotlar yuklanmoqda...</div>
+    </div>
+    
+    <div id="map"></div>
+    
+    <div class="top-bar" id="topBar">
+        <div class="top-bar-header">
+            <div>
+                <div class="order-badge">Buyurtma</div>
+                <div class="order-badge order-number">#<span id="orderId">...</span></div>
+            </div>
+            <div class="status-badge status-enroute" id="statusBadge">
+                🚗 Yo'lda
+            </div>
+        </div>
+        
+        <div class="customer-info">
+            <div class="avatar">👤</div>
+            <div class="customer-details">
+                <div class="customer-name" id="customerName">...</div>
+                <div class="customer-phone">
+                    <span>📞</span>
+                    <span id="customerPhone">...</span>
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    <div class="taximeter-container" id="taximeter">
+        <div class="meter-label">To'lov miqdori</div>
+        <div class="price-display" id="livePrice">0</div>
+        <div class="currency">O'ZBEK SO'MI</div>
+        
+        <div class="stats-grid">
+            <div class="stat-box">
+                <div class="stat-icon">📏</div>
+                <div class="stat-label">Masofa</div>
+                <div class="stat-value" id="liveKm">0.0 km</div>
+            </div>
+            <div class="stat-box">
+                <div class="stat-icon">⏱️</div>
+                <div class="stat-label">Vaqt</div>
+                <div class="stat-value" id="liveTime">00:00</div>
+            </div>
+        </div>
+    </div>
+    
+    <div class="bottom-panel" id="bottomPanel">
+        <div class="panel-handle"></div>
+        <button class="action-btn btn-primary" id="actionBtn" onclick="handleAction()">
+            <span class="btn-icon" id="actionIcon">📍</span>
+            <span class="btn-text" id="actionText">Manzilga keldim</span>
+        </button>
+    </div>
+    
+    <script src="https://cdn.jsdelivr.net/npm/maplibre-gl@3.6.2/dist/maplibre-gl.js"></script>
+    
+    <script>
+        // TELEGRAM WEBAPP INIT
+        const tg = window.Telegram.WebApp;
+        tg.expand();
+        tg.ready();
+        
+        // CONFIG
+        const API_URL = window.location.origin; // Avtomatik ravishda ngrok manzilingizni oladi
+        const urlParams = new URLSearchParams(window.location.search);
+        const orderId = urlParams.get('order_id');
+        
+        // STATE
+        let map, driverMarker, customerMarker, routingControl;
+        let lastRouteOrigin = null;
+        let lastPos = null;
+        let totalDistance = 0;
+        let currentState = 'enroute';
+        let tripStartTime = null;
+        let orderData = null;
+        let timerInterval = null;
+        
+        // PRICING
+        const PRICING = {
+            base: 5000,
+            perKm: 2500,
+            perMin: 500
+        };
+        
+        // INIT
+        async function init() {
+            if (!orderId) {
+                tg.showAlert('Order ID topilmadi!');
+                return;
+            }
+
+            try {
+                // MUAMMO TUZATILDI: ngrok ogohlantirishini chetlab o'tish uchun header qo'shildi
+                // VA URL to'g'ri API yo'nalishiga o'zgartirildi
+                const res = await fetch(`${API_URL}/api/webapp/order/${orderId}`, {
+                    headers: { 
+                        "ngrok-skip-browser-warning": "true",
+                        "Content-Type": "application/json"
+                    }
+                });
+                
+                if (!res.ok) throw new Error('Order not found');
+                
+                orderData = await res.json();
+                
+                // UPDATE UI
+                document.getElementById('orderId').textContent = orderData.order_id || orderData.id;
+                document.getElementById('customerName').textContent = orderData.customer_name || 'Mijoz';
+                document.getElementById('customerPhone').textContent = orderData.customer_phone || 'N/A';
+                
+                // INIT MAP
+                initMap();
+                
+                // HIDE LOADING
+                setTimeout(() => {
+                    document.getElementById('loadingScreen').classList.add('hidden');
+                }, 800);
+                
+            } catch (error) {
+                console.error('Init error:', error);
+                tg.showAlert('Ma\'lumotlarni yuklashda xatolik! API yo\'lini tekshiring.');
+            }
+        }
+        
+        // INIT MAP
+        function initMap() {
+            const pickupLat = orderData.pickup_latitude;
+            const pickupLon = orderData.pickup_longitude;
+
+            const driverLat = pickupLat;
+            const driverLng = pickupLon;
+
+            map = new maplibregl.Map({
+                container: 'map',
+                style: {
+                    version: 8,
+                    sources: {
+                        osm: {
+                            type: 'raster',
+                            tiles: [
+                                'https://a.tile.openstreetmap.org/{z}/{x}/{y}.png',
+                                'https://b.tile.openstreetmap.org/{z}/{x}/{y}.png',
+                                'https://c.tile.openstreetmap.org/{z}/{x}/{y}.png'
+                            ],
+                            tileSize: 256,
+                            maxzoom: 19
+                        }
+                    },
+                    layers: [{
+                        id: 'osm-tiles',
+                        type: 'raster',
+                        source: 'osm'
+                    }]
+                },
+                center: [driverLng, driverLat],
+                zoom: 17,
+                pitch: 55,
+                bearing: 0,
+                antialias: true
+            });
+
+            // CUSTOMER MARKER
+            const customerEl = document.createElement('div');
+            customerEl.className = 'customer-marker';
+            customerEl.textContent = '👤';
+            customerMarker = new maplibregl.Marker({
+                element: customerEl,
+                anchor: 'center'
+            }).setLngLat([pickupLon, pickupLat]).addTo(map);
+
+            // START TRACKING
+            startLocationTracking();
+        }
+        
+        // LOCATION TRACKING
+        function startLocationTracking() {
+            if (!navigator.geolocation) {
+                tg.showAlert('Geolokatsiya qo\'llab-quvvatlanmaydi');
+                return;
+            }
+            
+            navigator.geolocation.watchPosition(
+                updatePosition,
+                (error) => console.error('Geolocation error:', error),
+                {
+                    enableHighAccuracy: true,
+                    maximumAge: 3000,
+                    timeout: 10000
+                }
+            );
+        }
+        
+        // UPDATE POSITION
+        function updatePosition(pos) {
+            const lat = pos.coords.latitude;
+            const lon = pos.coords.longitude;
+            
+            // UPDATE DRIVER MARKER
+            if (!driverMarker) {
+                const driverEl = document.createElement('div');
+                driverEl.className = 'driver-marker';
+                driverEl.textContent = '🚕';
+                driverMarker = new maplibregl.Marker({
+                    element: driverEl,
+                    anchor: 'center'
+                }).setLngLat([lon, lat]).addTo(map);
+            } else {
+                driverMarker.setLngLat([lon, lat]);
+            }
+
+            // CAMERA FOLLOW (navigation-style)
+            const driverHeading = pos.coords.heading || 0;
+            map.easeTo({
+                center: [lon, lat],
+                zoom: 17,
+                bearing: driverHeading,
+                pitch: 55,
+                padding: { bottom: window.innerHeight * 0.30 },
+                duration: 300
+            });
+            
+            // CALCULATE DISTANCE (ONLY DURING TRIP)
+            if (currentState === 'ongoing') {
+                if (lastPos) {
+                    const distance = haversineDistanceKm(lastPos.lat, lastPos.lon, lat, lon) * 1000;
+                    
+                    if (distance > 2 && distance < 100) {
+                        totalDistance += (distance / 1000);
+                        updateMeterUI();
+                    }
+                }
+                lastPos = { lat, lon };
+            }
+            
+            // DRAW ROUTE
+            if (currentState !== 'ongoing') {
+                const targetLat = orderData.pickup_latitude;
+                const targetLon = orderData.pickup_longitude;
+                drawRoute({ lat, lon }, [targetLat, targetLon]);
+            }
+        }
+        
+        // DRAW ROUTE (OSRM + MapLibre)
+        function buildRouteGeoJSON(coords) {
+            return {
+                type: 'FeatureCollection',
+                features: [{
+                    type: 'Feature',
+                    geometry: {
+                        type: 'LineString',
+                        coordinates: coords
+                    },
+                    properties: {}
+                }]
+            };
+        }
+
+        function drawRoute(from, to) {
+            if (!map || !from || !to) return;
+
+            const fromLat = from.lat;
+            const fromLng = from.lon;
+            const toLat = to[0];
+            const toLng = to[1];
+
+            // Auto-update throttling: faqat ~15m dan ko'p siljiganda
+            if (lastRouteOrigin) {
+                const movedKm = haversineDistanceKm(
+                    lastRouteOrigin.lat,
+                    lastRouteOrigin.lon,
+                    fromLat,
+                    fromLng
+                );
+                if (movedKm < 0.015) {
+                    return;
+                }
+            }
+            lastRouteOrigin = { lat: fromLat, lon: fromLng };
+
+            const url = `https://router.project-osrm.org/route/v1/driving/${fromLng},${fromLat};${toLng},${toLat}?overview=full&geometries=geojson`;
+
+            fetch(url)
+                .then(r => r.json())
+                .then(data => {
+                    if (!data || !data.routes || !data.routes.length) return;
+                    const route = data.routes[0];
+                    if (!route.geometry || !route.geometry.coordinates) return;
+
+                    const coords = route.geometry.coordinates; // [lng, lat]
+                    const routeGeoJSON = buildRouteGeoJSON(coords);
+
+                    if (map.getSource('route')) {
+                        map.getSource('route').setData(routeGeoJSON);
+                    } else {
+                        map.addSource('route', {
+                            type: 'geojson',
+                            data: routeGeoJSON
+                        });
+                        map.addLayer({
+                            id: 'route-main',
+                            type: 'line',
+                            source: 'route',
+                            layout: {
+                                'line-join': 'round',
+                                'line-cap': 'round'
+                            },
+                            paint: {
+                                'line-color': '#FFD600',
+                                'line-width': 8
+                            }
+                        });
+                    }
+
+                    // Fit bounds: haydovchi + mijoz + yo'l
+                    const allPoints = coords.slice();
+                    allPoints.push([fromLng, fromLat], [toLng, toLat]);
+                    let minLng = allPoints[0][0],
+                        maxLng = allPoints[0][0],
+                        minLat = allPoints[0][1],
+                        maxLat = allPoints[0][1];
+                    for (let i = 1; i < allPoints.length; i++) {
+                        const lng = allPoints[i][0];
+                        const lat = allPoints[i][1];
+                        if (lng < minLng) minLng = lng;
+                        if (lng > maxLng) maxLng = lng;
+                        if (lat < minLat) minLat = lat;
+                        if (lat > maxLat) maxLat = lat;
+                    }
+                    map.fitBounds([[minLng, minLat], [maxLng, maxLat]], {
+                        padding: { top: 80, right: 40, bottom: 260, left: 40 },
+                        maxZoom: 18,
+                        duration: 500
+                    });
+                })
+                .catch(() => {});
+        }
+        
+        // UPDATE METER UI
+        function updateMeterUI() {
+            const price = PRICING.base + (totalDistance * PRICING.perKm);
+            document.getElementById('livePrice').textContent = Math.round(price).toLocaleString('uz-UZ');
+            document.getElementById('liveKm').textContent = totalDistance.toFixed(2) + ' km';
+            
+            if (tripStartTime) {
+                const elapsed = Math.floor((Date.now() - tripStartTime) / 1000);
+                const minutes = Math.floor(elapsed / 60).toString().padStart(2, '0');
+                const seconds = (elapsed % 60).toString().padStart(2, '0');
+                document.getElementById('liveTime').textContent = `${minutes}:${seconds}`;
+            }
+        }
+        
+        function haversineDistanceKm(lat1, lon1, lat2, lon2) {
+            const R = 6371;
+            const dLat = (lat2 - lat1) * Math.PI / 180;
+            const dLon = (lon2 - lon1) * Math.PI / 180;
+            const a =
+                Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+                Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) *
+                Math.sin(dLon / 2) * Math.sin(dLon / 2);
+            const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+            return R * c;
+        }
+
+        // HANDLE ACTION
+        async function handleAction() {
+            const btn = document.getElementById('actionBtn');
+            const badge = document.getElementById('statusBadge');
+            const actionText = document.getElementById('actionText');
+            const actionIcon = document.getElementById('actionIcon');
+            const taximeter = document.getElementById('taximeter');
+            const mapDiv = document.getElementById('map');
+            const topBar = document.getElementById('topBar');
+            
+            if (currentState === 'enroute') {
+                currentState = 'arrived';
+                badge.className = 'status-badge status-arrived';
+                badge.innerHTML = '✅ Kelgan';
+                btn.className = 'action-btn btn-success';
+                actionIcon.textContent = '🚀';
+                actionText.textContent = 'Safarni boshlash';
+                
+                await sendStatus('arrived');
+                
+            } else if (currentState === 'arrived') {
+                currentState = 'ongoing';
+                tripStartTime = Date.now();
+                lastPos = null;
+                totalDistance = 0;
+                
+                mapDiv.classList.add('minimized');
+                taximeter.style.display = 'block';
+                topBar.style.display = 'none';
+                badge.className = 'status-badge status-ongoing';
+                badge.innerHTML = '🚗 Safarda';
+                btn.className = 'action-btn btn-danger';
+                actionIcon.textContent = '🏁';
+                actionText.textContent = 'Safarni yakunlash';
+                
+                timerInterval = setInterval(updateMeterUI, 1000);
+                await sendStatus('started');
+                
+            } else if (currentState === 'ongoing') {
+                tg.showConfirm(
+                    'Safarni yakunlaysizmi?',
+                    async (confirmed) => {
+                        if (confirmed) {
+                            clearInterval(timerInterval);
+                            const finalPrice = Math.round(PRICING.base + (totalDistance * PRICING.perKm));
+                            await sendStatus('completed', {
+                                final_price: finalPrice,
+                                distance_km: totalDistance
+                            });
+                            
+                            tg.showAlert(
+                                `Safar yakunlandi!\n\nMasofa: ${totalDistance.toFixed(2)} km\nTo'lov: ${finalPrice.toLocaleString('uz-UZ')} so'm`,
+                                () => tg.close()
+                            );
+                        }
+                    }
+                );
+            }
+        }
+        
+        // SEND STATUS TO API (completed: final_price + distance_km — backend qayta hisoblamaydi)
+        async function sendStatus(status, opts) {
+            opts = opts || {};
+            try {
+                let url = `${API_URL}/api/webapp/order/${orderId}/status?new_status=${encodeURIComponent(status)}&v=${Date.now()}`;
+                const qtoken = urlParams.get('token');
+                if (qtoken) url += `&token=${encodeURIComponent(qtoken)}`;
+                if (String(status).toLowerCase() === 'completed') {
+                    const fp = opts.final_price;
+                    if (fp == null || isNaN(Number(fp)) || Number(fp) <= 0) {
+                        console.error('completed uchun final_price kerak');
+                        return;
+                    }
+                    url += `&final_price=${encodeURIComponent(fp)}`;
+                    if (opts.distance_km != null && !isNaN(Number(opts.distance_km))) {
+                        url += `&distance_km=${encodeURIComponent(opts.distance_km)}`;
+                    }
+                }
+                await fetch(url, {
+                    method: 'POST',
+                    headers: { 
+                        "ngrok-skip-browser-warning": "true",
+                        "Content-Type": "application/json"
+                    }
+                });
+            } catch (error) {
+                console.error('Status update error:', error);
+            }
+        }
+        
+        // BACK BUTTON
+        tg.BackButton.onClick(() => {
+            tg.showConfirm('Chiqmoqchimisiz?', (confirmed) => {
+                if (confirmed) tg.close();
+            });
+        });
+        tg.BackButton.show();
+        
+        init();
+    </script>
+</body>
+</html>
+</html>

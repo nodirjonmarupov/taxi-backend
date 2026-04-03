@@ -1,0 +1,1369 @@
+"""
+Driver Handlers - To'liq funksional + Taximeter + Payme
+"""
+import asyncio
+import json
+import time
+from datetime import datetime
+from aiogram import Router, F
+from aiogram.filters import Command, StateFilter
+from aiogram.types import (
+    Message, CallbackQuery, ReplyKeyboardMarkup, KeyboardButton,
+    ReplyKeyboardRemove, InlineKeyboardMarkup, InlineKeyboardButton, WebAppInfo
+)
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
+
+from app.core.database import AsyncSessionLocal
+from app.crud.user import UserCRUD, DriverCRUD
+from app.models.user import UserRole
+from app.models.order import Order, OrderStatus
+from app.core.logger import get_logger
+from app.core.config import settings
+from app.utils.distance import haversine_distance
+from sqlalchemy import text, select
+from app.services.taximeter_service import accumulate_order_distance_for_driver
+from app.bot.keyboards.driver_keyboards import (
+    DRIVER_GROUP_INVITE_URL,
+    driver_keyboard_already_registered,
+    driver_keyboard_full,
+    driver_keyboard_online_session,
+    driver_keyboard_pending_approval,
+)
+from app.bot.messages import (
+    get_text,
+    normalize_bot_lang,
+    DRIVER_REG_BUTTON_TEXTS,
+    DRIVER_ONLINE_TEXTS,
+    DRIVER_OFFLINE_TEXTS,
+    DRIVER_LINK_CARD_TEXTS,
+    DRIVER_BALANCE_TEXTS,
+    DRIVER_GROUP_TEXTS,
+)
+from app.bot.lang_utils import db_lang_for_telegram
+
+logger = get_logger(__name__)
+
+driver_router = Router()
+
+# Live location optimization cache
+_last_saved_location: dict = {}  # {driver_id: (lat, lng, timestamp)}
+MIN_MOVE_METERS = 50    # min movement to trigger DB save
+MIN_SAVE_INTERVAL = 30  # min seconds between saves
+
+
+# ============================================
+# FSM STATES
+# ============================================
+
+class DriverStates(StatesGroup):
+    """Driver ro'yxatdan o'tish holatlari"""
+    waiting_for_phone = State()
+    waiting_for_car_number = State()
+    waiting_for_car_model = State()
+    waiting_for_car_color = State()
+    waiting_for_license = State()
+    waiting_for_license_photo = State()
+
+
+class PaymeStates(StatesGroup):
+    """Payme karta bog'lash holatlari"""
+    waiting_for_card = State()
+    waiting_for_expire = State()
+    waiting_for_sms = State()
+
+
+# ============================================
+# WEBAPP DATA (Taksometrdan safar yakunlashi)
+# ============================================
+
+@driver_router.message(F.web_app_data)
+async def handle_webapp_data(message: Message):
+    """Taksometr WebApp sendData - faqat log. Xabarlar API orqali yuboriladi (update_order_status)."""
+    try:
+        data_str = message.web_app_data.data if message.web_app_data else None
+        if not data_str:
+            return
+        data = json.loads(data_str)
+        if data.get("status") == "finished" and data.get("order_id"):
+            logger.info(f"📱 WebApp sendData: Safar #{data.get('order_id')} yakunlandi (xabarlar API orqali yuboriladi)")
+    except Exception as e:
+        logger.error(f"WebApp data handler xato: {e}")
+
+
+# ============================================
+# DRIVER MENU
+# ============================================
+
+@driver_router.message(Command("driver"))
+async def driver_menu(message: Message, lang: str = "uz"):
+    """Haydovchi asosiy menyusi"""
+    lang = "uz"
+    try:
+        async with AsyncSessionLocal() as db:
+            lang = await db_lang_for_telegram(db, message.from_user.id)
+            user = await UserCRUD.get_by_telegram_id(db, message.from_user.id)
+            
+            if not user:
+                await message.answer(
+                    get_text(lang, "driver_err_start_first"),
+                    reply_markup=ReplyKeyboardRemove(),
+                )
+                return
+            
+            driver = await DriverCRUD.get_by_user_id(db, user.id)
+            
+            if not driver:
+                keyboard = ReplyKeyboardMarkup(
+                    keyboard=[[KeyboardButton(text=get_text(lang, "btn_be_driver"))]],
+                    resize_keyboard=True
+                )
+                await message.answer(
+                    get_text(lang, "driver_not_registered_prompt"),
+                    reply_markup=keyboard
+                )
+                return
+            
+            if not getattr(driver, "is_active", True):
+                await message.answer(
+                    get_text(lang, "driver_blocked_full"),
+                    parse_mode="HTML",
+                    reply_markup=ReplyKeyboardMarkup(
+                        keyboard=[[KeyboardButton(text=get_text(lang, "btn_order"))]],
+                        resize_keyboard=True
+                    )
+                )
+                return
+            
+            # STATUS
+            status = "🟢 ONLINE" if driver.is_available else "🔴 OFFLINE"
+            warning = ""
+            stars_count = int(driver.rating) if driver.rating else 5
+            stars_display = "⭐" * stars_count
+            
+            await message.answer(
+                get_text(
+                    lang,
+                    "driver_panel_body",
+                    name=user.first_name or "",
+                    car_model=driver.car_model,
+                    car_number=driver.car_number,
+                    rating=f"{driver.rating:.1f}",
+                    stars=stars_display,
+                    trips=driver.total_trips or 0,
+                    balance=f"{float(driver.balance or 0):.0f}",
+                    earnings=f"{driver.total_earnings or 0:.0f}",
+                    status=status,
+                    warning=warning,
+                ),
+                reply_markup=driver_keyboard_full(lang),
+                parse_mode="HTML",
+            )
+            
+    except Exception as e:
+        logger.error(f"❌ Driver menu xato: {e}")
+        import traceback
+        logger.error(f"Traceback: {traceback.format_exc()}")
+        await message.answer(get_text(lang, "driver_err_generic_retry"))
+
+
+@driver_router.message(F.text.in_(DRIVER_GROUP_TEXTS))
+async def driver_open_group_invite(message: Message, lang: str = "uz"):
+    """Reply klaviaturadagi guruh tugmasi — havola yuboriladi."""
+    lang = "uz"
+    try:
+        async with AsyncSessionLocal() as db:
+            lang = await db_lang_for_telegram(db, message.from_user.id)
+            user = await UserCRUD.get_by_telegram_id(db, message.from_user.id)
+            if not user:
+                await message.answer(get_text(lang, "driver_err_start_first"))
+                return
+            driver = await DriverCRUD.get_by_user_id(db, user.id)
+            if not driver:
+                await message.answer(get_text(lang, "driver_err_group_only_drivers"))
+                return
+        await message.answer(
+            get_text(lang, "driver_group_invite_html", url=DRIVER_GROUP_INVITE_URL),
+            parse_mode="HTML",
+            disable_web_page_preview=True,
+        )
+    except Exception as e:
+        logger.error(f"Guruh havolasi xato: {e}")
+        await message.answer(get_text(lang, "driver_err_generic_short"))
+
+
+# ============================================
+# DRIVER REGISTRATION
+# ============================================
+
+@driver_router.message(Command("driver_reg"))
+@driver_router.message(F.text.in_(DRIVER_REG_BUTTON_TEXTS))
+async def register_driver_start(message: Message, state: FSMContext, lang: str = "uz"):
+    """Ro'yxatdan o'tishni boshlash"""
+    lang = "uz"
+    try:
+        async with AsyncSessionLocal() as db:
+            lang = await db_lang_for_telegram(db, message.from_user.id)
+            user = await UserCRUD.get_by_telegram_id(db, message.from_user.id)
+            
+            if user:
+                driver = await DriverCRUD.get_by_user_id(db, user.id)
+                
+                if driver:
+                    await message.answer(
+                        get_text(
+                            lang,
+                            "driver_already_registered_warn",
+                            car_model=driver.car_model,
+                            car_number=driver.car_number,
+                        ),
+                        reply_markup=driver_keyboard_already_registered(lang),
+                        parse_mode="HTML",
+                    )
+                    return
+        
+        await message.answer(
+            get_text(lang, "driver_reg_phone_prompt"),
+            reply_markup=ReplyKeyboardMarkup(
+                keyboard=[[KeyboardButton(text=get_text(lang, "driver_btn_send_phone"), request_contact=True)]],
+                resize_keyboard=True
+            ),
+            parse_mode="HTML"
+        )
+        await state.set_state(DriverStates.waiting_for_phone)
+        
+    except Exception as e:
+        logger.error(f"❌ Register start xato: {e}")
+        await message.answer(get_text(lang, "driver_err_generic_retry"))
+
+
+# Inline tanlash uchun variantlar
+CAR_MODELS = [
+    ["Cobalt", "Gentra", "Nexia 3"],
+    ["Malibu", "Lacetti", "Spark"],
+    ["Damas", "Tico", "Matiz"],
+    ["Boshqa"]
+]
+CAR_COLORS = [
+    ["Oq", "Qora", "Kumush"],
+    ["Kulrang", "Ko'k", "Yashil"],
+    ["Qizil", "Sariq", "Boshqa"]
+]
+
+
+@driver_router.message(DriverStates.waiting_for_phone, F.contact)
+async def register_phone(message: Message, state: FSMContext, lang: str = "uz"):
+    """Telefon qabul qilish (request_contact)"""
+    async with AsyncSessionLocal() as db:
+        lang = await db_lang_for_telegram(db, message.from_user.id)
+    await state.update_data(phone=message.contact.phone_number)
+    await message.answer(
+        get_text(lang, "driver_phone_ok_next_plate"),
+        reply_markup=ReplyKeyboardRemove()
+    )
+    await state.set_state(DriverStates.waiting_for_car_number)
+
+
+@driver_router.message(DriverStates.waiting_for_phone)
+async def register_phone_invalid(message: Message, state: FSMContext, lang: str = "uz"):
+    """Telefon o'rniga boshqa yuborilganda"""
+    async with AsyncSessionLocal() as db:
+        lang = await db_lang_for_telegram(db, message.from_user.id)
+    await message.answer(
+        get_text(lang, "driver_phone_use_button"),
+        reply_markup=ReplyKeyboardMarkup(
+            keyboard=[[KeyboardButton(text=get_text(lang, "driver_btn_send_phone"), request_contact=True)]],
+            resize_keyboard=True
+        ),
+        parse_mode="HTML"
+    )
+
+
+@driver_router.message(DriverStates.waiting_for_car_number, F.text)
+async def register_car_number(message: Message, state: FSMContext, lang: str = "uz"):
+    """Mashina raqami"""
+    async with AsyncSessionLocal() as db:
+        lang = await db_lang_for_telegram(db, message.from_user.id)
+    await state.update_data(car_number=message.text.strip().upper())
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=m, callback_data=f"car_model:{m}") for m in row]
+        for row in CAR_MODELS
+    ])
+    await message.answer(get_text(lang, "driver_car_accept_model"), reply_markup=kb)
+    await state.set_state(DriverStates.waiting_for_car_model)
+
+
+@driver_router.callback_query(StateFilter(DriverStates.waiting_for_car_model), F.data.startswith("car_model:"))
+async def register_car_model(callback: CallbackQuery, state: FSMContext, lang: str = "uz"):
+    """Mashina modeli (inline tanlash)"""
+    async with AsyncSessionLocal() as db:
+        lang = await db_lang_for_telegram(db, callback.from_user.id)
+    model = callback.data.split(":")[1]
+    await state.update_data(car_model=model)
+    await callback.answer(get_text(lang, "driver_cb_accept_ok"))
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=c, callback_data=f"car_color:{c}") for c in row]
+        for row in CAR_COLORS
+    ])
+    await callback.message.edit_text(get_text(lang, "driver_pick_car_color"), reply_markup=kb)
+    await state.set_state(DriverStates.waiting_for_car_color)
+
+
+@driver_router.callback_query(StateFilter(DriverStates.waiting_for_car_color), F.data.startswith("car_color:"))
+async def register_car_color(callback: CallbackQuery, state: FSMContext, lang: str = "uz"):
+    """Mashina rangi (inline tanlash)"""
+    async with AsyncSessionLocal() as db:
+        lang = await db_lang_for_telegram(db, callback.from_user.id)
+    color = callback.data.split(":")[1]
+    await state.update_data(car_color=color)
+    await callback.answer(get_text(lang, "driver_cb_accept_ok"))
+    await callback.message.edit_text(get_text(lang, "driver_license_prompt"))
+    await state.set_state(DriverStates.waiting_for_license)
+
+
+@driver_router.message(DriverStates.waiting_for_license, F.text)
+async def register_license(message: Message, state: FSMContext, lang: str = "uz"):
+    """
+    Guvohnoma raqami qabul qilish.
+    Vaqtinchalik guvohnoma rasm talab qilinmaydi – shu yerning o'zida driver yaratiladi.
+    """
+    lang = "uz"
+    await state.update_data(license_number=message.text.strip())
+    data = await state.get_data()
+    file_id = None  # vaqtinchalik rasm olmaymiz
+
+    try:
+        async with AsyncSessionLocal() as db:
+            from app.models.user import Driver as DriverModel
+            from app.core.config import settings
+
+            lang = await db_lang_for_telegram(db, message.from_user.id)
+            user = await UserCRUD.get_by_telegram_id(db, message.from_user.id)
+
+            if not user:
+                await message.answer(get_text(lang, "driver_err_user_missing"))
+                await state.clear()
+                return
+
+            driver = await DriverCRUD.get_by_user_id(db, user.id)
+
+            if driver:
+                await message.answer(get_text(lang, "driver_err_already_driver_cmd"))
+                await state.clear()
+                return
+
+            new_driver = DriverModel(
+                user_id=user.id,
+                car_number=data.get('car_number'),
+                car_model=data.get('car_model'),
+                car_color=data.get('car_color'),
+                license_number=data.get('license_number'),
+                driver_license_photo_id=file_id,
+                is_verified=False,
+                is_available=False,
+                rating=5.0,
+                total_trips=0,
+                completed_trips=0,
+                cancelled_trips=0,
+                total_earnings=0.0,
+            )
+            db.add(new_driver)
+            user.role = UserRole.DRIVER
+            user.phone = data.get('phone')
+
+            await db.commit()
+            await db.refresh(new_driver)
+            await state.clear()
+
+            await message.answer(
+                get_text(lang, "driver_app_submitted"),
+                reply_markup=driver_keyboard_pending_approval(lang),
+                parse_mode="HTML",
+            )
+
+            logger.info(f"✅ Driver arizasi yuborildi (rasmsiz): User {user.telegram_id}, Driver {new_driver.id}")
+
+            admin_kb = InlineKeyboardMarkup(inline_keyboard=[
+                [
+                    InlineKeyboardButton(text="✅ Tasdiqlash", callback_data=f"approve_driver:{new_driver.id}"),
+                    InlineKeyboardButton(text="❌ Rad etish", callback_data=f"reject_driver:{new_driver.id}")
+                ]
+            ])
+
+            admin_text = (
+                "🚕 <b>YANGI HAYDOVCHI ARIZASI</b>\n"
+                "━━━━━━━━━━━━━━━━━━━━\n"
+                f"👤 <b>Ism:</b> {user.first_name} {user.last_name or ''}\n"
+                f"📱 <b>Telefon:</b> {user.phone or 'N/A'}\n"
+                f"📞 <b>Telegram:</b> @{user.username or 'yoq'}\n"
+                "━━━━━━━━━━━━━━━━━━━━\n"
+                f"🚗 <b>Mashina:</b> {data.get('car_model')} ({data.get('car_number')})\n"
+                f"🎨 <b>Rang:</b> {data.get('car_color')}\n"
+                f"📄 <b>Guvohnoma:</b> {data.get('license_number')}\n"
+                "━━━━━━━━━━━━━━━━━━━━\n"
+                f"📅 {new_driver.created_at.strftime('%d.%m.%Y %H:%M')}\n\n"
+                "📸 <i>Guvohnoma rasmi yuborilmagan (vaqtinchalik rasm talab qilinmaydi).</i>"
+            )
+
+            from app.bot.telegram_bot import bot
+            for admin_id in getattr(settings, "ADMIN_IDS", []):
+                try:
+                    await bot.send_message(
+                        chat_id=admin_id,
+                        text=admin_text,
+                        reply_markup=admin_kb,
+                        parse_mode="HTML"
+                    )
+                except Exception as e:
+                    logger.error(f"Admin {admin_id}ga xabar yuborishda xato: {e}")
+
+    except Exception as e:
+        logger.error(f"❌ Driver yaratishda xato: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
+        await message.answer(get_text(lang, "driver_save_failed"))
+        await state.clear()
+
+
+@driver_router.message(DriverStates.waiting_for_license_photo, F.photo)
+async def register_license_photo(message: Message, state: FSMContext, lang: str = "uz"):
+    """Guvohnoma rasmini qabul qilish va admin'ga yuborish"""
+    lang = "uz"
+    data = await state.get_data()
+    photo = message.photo[-1]
+    file_id = photo.file_id
+
+    try:
+        async with AsyncSessionLocal() as db:
+            from app.models.user import Driver as DriverModel
+            from app.core.config import settings
+
+            lang = await db_lang_for_telegram(db, message.from_user.id)
+            user = await UserCRUD.get_by_telegram_id(db, message.from_user.id)
+
+            if not user:
+                await message.answer(get_text(lang, "driver_err_user_missing"))
+                await state.clear()
+                return
+
+            driver = await DriverCRUD.get_by_user_id(db, user.id)
+
+            if driver:
+                await message.answer(get_text(lang, "driver_err_already_driver_cmd"))
+                await state.clear()
+                return
+
+            new_driver = DriverModel(
+                user_id=user.id,
+                car_number=data.get('car_number'),
+                car_model=data.get('car_model'),
+                car_color=data.get('car_color'),
+                license_number=data.get('license_number'),
+                driver_license_photo_id=file_id,
+                is_verified=False,
+                is_available=False,
+                rating=5.0,
+                total_trips=0,
+                total_earnings=0.0,
+            )
+            db.add(new_driver)
+            user.role = UserRole.DRIVER
+            user.phone = data.get('phone')
+
+            await db.commit()
+            await db.refresh(new_driver)
+            await state.clear()
+
+            await message.answer(
+                get_text(lang, "driver_app_submitted"),
+                reply_markup=driver_keyboard_pending_approval(lang),
+                parse_mode="HTML",
+            )
+
+            logger.info(f"✅ Driver arizasi yuborildi: User {user.telegram_id}, Driver {new_driver.id}")
+
+            admin_kb = InlineKeyboardMarkup(inline_keyboard=[
+                [
+                    InlineKeyboardButton(text="✅ Tasdiqlash", callback_data=f"approve_driver:{new_driver.id}"),
+                    InlineKeyboardButton(text="❌ Rad etish", callback_data=f"reject_driver:{new_driver.id}")
+                ]
+            ])
+
+            admin_text = (
+                "🚕 <b>YANGI HAYDOVCHI ARIZASI</b>\n"
+                "━━━━━━━━━━━━━━━━━━━━\n"
+                f"👤 <b>Ism:</b> {user.first_name} {user.last_name or ''}\n"
+                f"📱 <b>Telefon:</b> {user.phone or 'N/A'}\n"
+                f"📞 <b>Telegram:</b> @{user.username or 'yoq'}\n"
+                "━━━━━━━━━━━━━━━━━━━━\n"
+                f"🚗 <b>Mashina:</b> {data.get('car_model')} ({data.get('car_number')})\n"
+                f"🎨 <b>Rang:</b> {data.get('car_color')}\n"
+                f"📄 <b>Guvohnoma:</b> {data.get('license_number')}\n"
+                "━━━━━━━━━━━━━━━━━━━━\n"
+                f"📅 {new_driver.created_at.strftime('%d.%m.%Y %H:%M')}\n\n"
+                "📸 <i>Guvohnoma rasmi pastda:</i>"
+            )
+
+            from app.bot.telegram_bot import bot
+            for admin_id in getattr(settings, "ADMIN_IDS", []):
+                try:
+                    await bot.send_message(
+                        chat_id=admin_id,
+                        text=admin_text,
+                        reply_markup=admin_kb,
+                        parse_mode="HTML"
+                    )
+                    await bot.send_photo(
+                        chat_id=admin_id,
+                        photo=file_id,
+                        caption="📄 Haydovchilik guvohnomasi"
+                    )
+                except Exception as e:
+                    logger.error(f"Admin {admin_id}ga xabar yuborishda xato: {e}")
+
+    except Exception as e:
+        logger.error(f"❌ Driver yaratishda xato: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
+        await message.answer(get_text(lang, "driver_save_failed"))
+        await state.clear()
+
+
+@driver_router.message(DriverStates.waiting_for_license_photo)
+async def register_license_photo_invalid(message: Message, state: FSMContext, lang: str = "uz"):
+    """Rasm o'rniga matn/document yuborilganda - validatsiya"""
+    async with AsyncSessionLocal() as db:
+        lang = await db_lang_for_telegram(db, message.from_user.id)
+    await message.answer(
+        get_text(lang, "driver_photo_license_only"),
+        parse_mode="HTML"
+    )
+
+
+# ============================================
+# ACCEPT ORDER + TAXIMETER
+# ============================================
+
+@driver_router.callback_query(F.data.startswith("accept_order:"))
+async def accept_order(callback: CallbackQuery):
+    """Buyurtmani qabul qilish va TAKSOMETR yuborish"""
+    try:
+        order_id = int(callback.data.split(":")[1])
+
+        from app.services.order_service import stop_driver_timer, clear_dispatch_state
+        stop_driver_timer(order_id)
+        clear_dispatch_state(order_id)
+
+        logger.info(f"🎯 Driver {callback.from_user.id} buyurtma {order_id}ni qabul qilmoqda...")
+        
+        async with AsyncSessionLocal() as db:
+            try:
+                user = await UserCRUD.get_by_telegram_id(db, callback.from_user.id)
+                driver_ui_lang = normalize_bot_lang(getattr(user, "language_code", None) or "uz") if user else "uz"
+                if not user:
+                    await callback.answer(get_text("uz", "driver_accept_err"), show_alert=True)
+                    return
+
+                driver = await DriverCRUD.get_by_user_id(db, user.id)
+                if not driver:
+                    await callback.answer(get_text(driver_ui_lang, "driver_accept_err"), show_alert=True)
+                    return
+                if not getattr(driver, "is_active", True):
+                    await callback.answer(get_text(driver_ui_lang, "driver_accept_deactivated"), show_alert=True)
+                    return
+
+                from app.crud.order_crud import OrderCRUD
+
+                order = await OrderCRUD.get_by_id_for_update(db, order_id)
+
+                if not order:
+                    await callback.answer(get_text(driver_ui_lang, "driver_accept_order_missing"), show_alert=True)
+                    return
+
+                if order.status != OrderStatus.PENDING:
+                    await callback.answer(get_text(driver_ui_lang, "driver_accept_order_taken"), show_alert=True)
+                    return
+
+                existing = await OrderCRUD.get_ongoing_order_for_driver(db, driver.id)
+                if existing and existing.id != order_id:
+                    await callback.answer(get_text(driver_ui_lang, "driver_accept_busy"), show_alert=True)
+                    return
+
+                order.driver_id = driver.id
+                order.status = OrderStatus.ACCEPTED
+                await db.commit()
+            except Exception:
+                try:
+                    await db.rollback()
+                except Exception:
+                    pass
+                raise
+            
+            logger.info(f"✅ Order {order_id} status: ACCEPTED")
+            
+            # TAXIMETER URL — token bilan xavfsiz (faqat bu haydovchi yangilashi mumkin)
+            from app.utils.webapp_token import generate_webapp_token
+            base_url = getattr(settings, "WEBAPP_BASE_URL", "https://candid-semiexposed-dung.ngrok-free.dev")
+            ts = int(time.time())
+            token = generate_webapp_token(order.id, driver.id)
+            webapp_url = f"{base_url}/taximeter_v2?order_id={order.id}&token={token}&t={ts}&v={ts}"
+            
+            logger.info(f"📱 Taximeter WebApp tugmasi URL: {webapp_url}")
+            
+            kb = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(
+                    text=get_text(driver_ui_lang, "driver_btn_open_taximeter"),
+                    web_app=WebAppInfo(url=webapp_url)
+                )],
+                [InlineKeyboardButton(
+                    text=get_text(driver_ui_lang, "driver_btn_write_customer"),
+                    callback_data="driver_chat_tip",
+                )],
+            ])
+
+            await callback.message.edit_text(
+                get_text(driver_ui_lang, "driver_accept_order_body", order_id=order.id),
+                reply_markup=kb,
+                parse_mode="HTML",
+            )
+
+            await callback.answer(get_text(driver_ui_lang, "driver_accept_ok_short"), show_alert=False)
+
+            logger.info(f"✅ Driver {driver.id} buyurtma {order_id}ni qabul qildi")
+
+            # MIJOZGA XABAR + TRACKING TUGMASI
+            order_user = await UserCRUD.get_by_id(db, order.user_id)
+
+            if order_user:
+                try:
+                    user_lang = normalize_bot_lang(getattr(order_user, "language_code", None) or "uz")
+                    base_url = getattr(settings, "WEBAPP_BASE_URL", "https://candid-semiexposed-dung.ngrok-free.dev")
+                    ts = int(time.time())
+                    tracking_url = f"{base_url}/tracking?order_id={order.id}&t={ts}"
+                    tracking_kb = InlineKeyboardMarkup(inline_keyboard=[
+                        [InlineKeyboardButton(
+                            text=get_text(user_lang, "track_driver"),
+                            web_app=WebAppInfo(url=tracking_url)
+                        )],
+                        [InlineKeyboardButton(
+                            text=get_text(user_lang, "user_btn_write_driver"),
+                            callback_data="user_chat_tip",
+                        )],
+                    ])
+                    driver_msg = (
+                        f"{get_text(user_lang, 'driver_found_title')}\n\n"
+                        f"👨‍✈️ {user.first_name}\n"
+                        f"🚗 {driver.car_model} ({driver.car_number})\n"
+                        f"⭐️ {get_text(user_lang, 'rating_label')}: {driver.rating:.1f}/5.0\n\n"
+                        f"{get_text(user_lang, 'taxi_arriving')}\n"
+                        f"{get_text(user_lang, 'chat_via_bot')}"
+                    )
+                    sent_msg = await callback.bot.send_message(
+                        chat_id=order_user.telegram_id,
+                        text=driver_msg,
+                        reply_markup=tracking_kb,
+                        parse_mode="HTML",
+                    )
+                    order.user_tracking_message_id = sent_msg.message_id
+                    await db.commit()
+                    logger.info(f"✅ Mijozga xabar yuborildi (tracking mid={sent_msg.message_id})")
+                except Exception as e:
+                    logger.error(f"❌ Mijozga xabar yuborishda xato: {e}")
+            
+    except Exception as e:
+        logger.error(f"❌ Qabul qilishda xato: {e}")
+        import traceback
+        logger.error(f"Traceback: {traceback.format_exc()}")
+        await callback.answer(get_text("uz", "driver_accept_fatal"), show_alert=True)
+
+
+@driver_router.callback_query(F.data == "driver_chat_tip")
+async def driver_chat_tip(callback: CallbackQuery):
+    """Mijozga yozish eslatmasi — ko'zga tashlanadigan alert."""
+    async with AsyncSessionLocal() as db:
+        lang = await db_lang_for_telegram(db, callback.from_user.id)
+    await callback.answer(get_text(lang, "driver_chat_tip_alert"), show_alert=True)
+
+
+@driver_router.callback_query(F.data.startswith("reject_order:"))
+async def reject_order(callback: CallbackQuery):
+    """Buyurtmani rad etish — keyingi haydovchiga taklif yuborish"""
+    try:
+        order_id = int(callback.data.split(":")[1])
+        from app.services.order_service import offer_to_next_driver
+        driver_lang = "uz"
+        try:
+            async with AsyncSessionLocal() as _db:
+                driver_lang = await db_lang_for_telegram(_db, callback.from_user.id)
+        except Exception:
+            pass
+        await callback.message.edit_text(
+            get_text(driver_lang, "order_rejected"),
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[]),
+        )
+        await callback.answer(get_text(driver_lang, "driver_reject_ok_toast"))
+        logger.info(f"Driver {callback.from_user.id} buyurtma {order_id}ni rad etdi")
+        asyncio.create_task(offer_to_next_driver(order_id, from_timeout_or_reject=True))
+    except Exception as e:
+        logger.error(f"❌ Rad etishda xato: {e}")
+        await callback.answer(get_text("uz", "driver_accept_err"), show_alert=True)
+
+
+# ============================================
+# ONLINE/OFFLINE
+# ============================================
+
+# Track online drivers for location refresh
+_online_drivers = set()
+
+
+async def _keep_location_fresh(driver_id: int):
+    """Driver online bo'lganda location_updated_at ni yangilab turadi"""
+    _online_drivers.add(driver_id)
+    try:
+        while driver_id in _online_drivers:
+            await asyncio.sleep(60)
+            if driver_id not in _online_drivers:
+                break
+            try:
+                async with AsyncSessionLocal() as db:
+                    result = await db.execute(
+                        text("""
+                            UPDATE drivers
+                            SET location_updated_at = NOW()
+                            WHERE id = :driver_id
+                            AND is_available = true
+                            AND location IS NOT NULL
+                        """),
+                        {"driver_id": driver_id}
+                    )
+                    await db.commit()
+                    if result.rowcount > 0:
+                        pass  # silent refresh
+                    else:
+                        # Driver offline bo'ldi
+                        _online_drivers.discard(driver_id)
+                        break
+            except Exception:
+                pass
+    finally:
+        _online_drivers.discard(driver_id)
+
+
+@driver_router.message(F.text.in_(DRIVER_ONLINE_TEXTS))
+async def go_online(message: Message, lang: str = "uz"):
+    """Online bo'lish"""
+    lang = "uz"
+    try:
+        async with AsyncSessionLocal() as db:
+            lang = await db_lang_for_telegram(db, message.from_user.id)
+            user = await UserCRUD.get_by_telegram_id(db, message.from_user.id)
+            
+            if not user:
+                logger.error(f"User topilmadi: {message.from_user.id}")
+                await message.answer(get_text(lang, "driver_go_online_err_start"))
+                return
+            
+            driver = await DriverCRUD.get_by_user_id(db, user.id)
+            
+            if not driver:
+                logger.error(f"Driver topilmadi: user_id={user.id}")
+                await message.answer(get_text(lang, "driver_go_online_not_driver"))
+                return
+            if not getattr(driver, "is_active", True):
+                await message.answer(get_text(lang, "driver_blocked_panel"))
+                return
+
+            # Vaqt: PostgreSQL NOW() — matching so'rovidagi NOW() bilan sinxron
+            if driver.current_latitude and driver.current_longitude:
+                await db.execute(
+                    text("""
+                        UPDATE drivers SET
+                            is_available = true,
+                            status = 'active',
+                            location = ST_SetSRID(ST_MakePoint(:lon, :lat), 4326)::geography,
+                            location_updated_at = NOW()
+                        WHERE id = :driver_id
+                    """),
+                    {
+                        "driver_id": driver.id,
+                        "lon": float(driver.current_longitude),
+                        "lat": float(driver.current_latitude),
+                    },
+                )
+            else:
+                await db.execute(
+                    text("""
+                        UPDATE drivers SET
+                            is_available = true,
+                            status = 'active',
+                            location_updated_at = NOW()
+                        WHERE id = :driver_id
+                    """),
+                    {"driver_id": driver.id},
+                )
+
+            await db.commit()
+
+            asyncio.create_task(_keep_location_fresh(driver.id))
+
+            logger.info(f"✅ Driver {driver.id} ONLINE bo'ldi")
+
+            await message.answer_photo(
+                photo="AgACAgIAAxkBAAICpWnKHSfqZLUxRjRJzimH2Xke1IAQAAJGFWsbsUlRSg5AuNQWgBKyAQADAgADeAADOgQ",
+                caption=(
+                    "✅ <b>Siz ONLINE holatdasiz.</b>\n\n"
+                    "📍 <b>Jonli lokatsiya yuborish:</b>\n"
+                    "📎 (Biriktirish) → Joylashuv → "
+                    "Jonli joylashuvimni ulashish → 8 soat\n\n"
+                    "⚡ Shunday qilib buyurtmalar avtomatik keladi!"
+                ),
+                parse_mode="HTML",
+                reply_markup=ReplyKeyboardMarkup(
+                    keyboard=[[KeyboardButton(text="🔴 Offline")]],
+                    resize_keyboard=True,
+                ),
+            )
+            
+    except Exception as e:
+        logger.error(f"❌ Online qilishda xato: {e}")
+        import traceback
+        logger.error(f"Traceback: {traceback.format_exc()}")
+        await message.answer(get_text(lang, "driver_err_generic_retry"))
+
+
+@driver_router.message(F.text.in_(DRIVER_OFFLINE_TEXTS))
+async def go_offline(message: Message, lang: str = "uz"):
+    """Offline bo'lish"""
+    lang = "uz"
+    try:
+        async with AsyncSessionLocal() as db:
+            lang = await db_lang_for_telegram(db, message.from_user.id)
+            user = await UserCRUD.get_by_telegram_id(db, message.from_user.id)
+            
+            if not user:
+                logger.error(f"User topilmadi: {message.from_user.id}")
+                await message.answer(get_text(lang, "driver_go_online_err_start"))
+                return
+            
+            driver = await DriverCRUD.get_by_user_id(db, user.id)
+            
+            if not driver:
+                logger.error(f"Driver topilmadi: user_id={user.id}")
+                await message.answer(get_text(lang, "driver_go_online_not_driver"))
+                return
+            if not getattr(driver, "is_active", True):
+                await message.answer(get_text(lang, "driver_blocked_short"))
+                return
+
+            _online_drivers.discard(driver.id)
+            _last_saved_location.pop(driver.id, None)
+
+            driver.is_available = False
+            driver.status = "pending"
+            await db.commit()
+
+            logger.info(f"Driver {driver.id} OFFLINE bo'ldi")
+            
+            await message.answer(
+                get_text(lang, "driver_offline_intro"),
+                reply_markup=driver_keyboard_full(lang),
+                parse_mode="HTML",
+            )
+            
+    except Exception as e:
+        logger.error(f"❌ Offline qilishda xato: {e}")
+        import traceback
+        logger.error(f"Traceback: {traceback.format_exc()}")
+        await message.answer(get_text(lang, "driver_err_generic_retry"))
+
+
+# ============================================
+# LOCATION UPDATE
+# ============================================
+
+@driver_router.message(F.location)
+async def update_location(message: Message, lang: str = "uz"):
+    """Lokatsiya yangilash"""
+    try:
+        async with AsyncSessionLocal() as db:
+            lang = await db_lang_for_telegram(db, message.from_user.id)
+            user = await UserCRUD.get_by_telegram_id(db, message.from_user.id)
+            if not user:
+                return
+            
+            driver = await DriverCRUD.get_by_user_id(db, user.id)
+            if not driver or not getattr(driver, "is_active", True):
+                return
+
+            if not driver.is_available or driver.status != 'active':
+                return
+
+            lat = message.location.latitude
+            lon = message.location.longitude
+
+            # PostGIS/Geography uchun location + location_updated_at ham yangilanadi
+            await db.execute(
+                text("""
+                    UPDATE drivers
+                    SET
+                        current_latitude = :lat,
+                        current_longitude = :lon,
+                        location = ST_SetSRID(ST_MakePoint(:lon, :lat), 4326)::geography,
+                        location_updated_at = NOW()
+                    WHERE id = :driver_id
+                """),
+                {"driver_id": driver.id, "lat": lat, "lon": lon},
+            )
+            await accumulate_order_distance_for_driver(db, driver.id, lat, lon)
+            await db.commit()
+
+            logger.info(f"📍 Driver {driver.id} lokatsiya yangilandi: {lat:.6f}, {lon:.6f}")
+            
+            await message.answer(get_text(lang, "driver_location_ok"), parse_mode="HTML")
+            
+    except Exception as e:
+        logger.error(f"❌ Lokatsiya yangilashda xato: {e}")
+
+
+# ============================================
+# TELEGRAM LIVE LOCATION (edited_message)
+# ============================================
+
+@driver_router.edited_message(F.location)
+async def live_location_update(message: Message):
+    """Telegram Live Location avtomatik yangilanishi"""
+    try:
+        async with AsyncSessionLocal() as db:
+            user = await UserCRUD.get_by_telegram_id(
+                db, message.from_user.id
+            )
+            if not user:
+                return
+
+            driver = await DriverCRUD.get_by_user_id(db, user.id)
+            if not driver:
+                return
+
+            # Skip if driver is offline — save DB resources
+            if not driver.is_available or driver.status != 'active':
+                logger.debug(
+                    f"⏭ Driver {driver.id} offline, "
+                    f"live location skip qilindi"
+                )
+                return
+
+            lat = message.location.latitude
+            lon = message.location.longitude
+            now = time.time()
+
+            trip_row = await db.execute(
+                select(Order.id)
+                .where(Order.driver_id == driver.id)
+                .where(Order.status == OrderStatus.IN_PROGRESS)
+                .limit(1)
+            )
+            in_progress = trip_row.scalar_one_or_none() is not None
+
+            if in_progress:
+                await db.execute(
+                    text("""
+                        UPDATE drivers
+                        SET
+                            current_latitude = :lat,
+                            current_longitude = :lon,
+                            location = ST_SetSRID(ST_MakePoint(:lon, :lat), 4326)::geography,
+                            location_updated_at = NOW()
+                        WHERE id = :driver_id
+                    """),
+                    {"driver_id": driver.id, "lat": lat, "lon": lon},
+                )
+                await accumulate_order_distance_for_driver(db, driver.id, lat, lon)
+                await db.commit()
+                logger.info(
+                    f"📍 Driver {driver.id} safar live location: {lat:.6f}, {lon:.6f}"
+                )
+                return
+
+            # FIX 1: Skip if driver not moved enough
+            last = _last_saved_location.get(driver.id)
+            if last:
+                last_lat, last_lon, last_time = last
+                dist = haversine_distance(lat, lon, last_lat, last_lon) * 1000
+                time_diff = now - last_time
+                if dist < MIN_MOVE_METERS and time_diff < MIN_SAVE_INTERVAL:
+                    logger.debug(
+                        f"⏭ Driver {driver.id} harakatlanmadi "
+                        f"({dist:.1f}m), skip"
+                    )
+                    return
+
+            # Save current location to cache
+            _last_saved_location[driver.id] = (lat, lon, now)
+
+            await db.execute(
+                text("""
+                    UPDATE drivers
+                    SET
+                        current_latitude = :lat,
+                        current_longitude = :lon,
+                        location = ST_SetSRID(
+                            ST_MakePoint(:lon, :lat), 4326
+                        )::geography,
+                        location_updated_at = NOW()
+                    WHERE id = :driver_id
+                """),
+                {"driver_id": driver.id, "lat": lat, "lon": lon}
+            )
+            await db.commit()
+            logger.info(
+                f"📍 Driver {driver.id} live location: "
+                f"{lat:.6f}, {lon:.6f}"
+            )
+
+    except Exception as e:
+        logger.error(f"Live location xato: {e}")
+
+
+# ============================================
+# BALANCE
+# ============================================
+
+@driver_router.message(F.text.in_(DRIVER_BALANCE_TEXTS))
+async def show_balance(message: Message, lang: str = "uz"):
+    """Balans"""
+    try:
+        async with AsyncSessionLocal() as db:
+            lang = await db_lang_for_telegram(db, message.from_user.id)
+            user = await UserCRUD.get_by_telegram_id(db, message.from_user.id)
+            if not user:
+                return
+            
+            driver = await DriverCRUD.get_by_user_id(db, user.id)
+            if not driver:
+                return
+            
+            await message.answer(
+                get_text(
+                    lang,
+                    "driver_balance_body",
+                    amount=f"{driver.total_earnings or 0:.0f}",
+                    trips=driver.total_trips or 0,
+                ),
+                parse_mode="HTML"
+            )
+            
+    except Exception as e:
+        logger.error(f"❌ Balans ko'rsatishda xato: {e}")
+
+
+# ============================================
+# PAYME CARD LINKING
+# ============================================
+
+@driver_router.message(F.text.in_(DRIVER_LINK_CARD_TEXTS))
+async def link_card_start(message: Message, state: FSMContext, lang: str = "uz"):
+    """Kartani bog'lash boshlash"""
+    async with AsyncSessionLocal() as db:
+        lang = await db_lang_for_telegram(db, message.from_user.id)
+    await message.answer(
+        get_text(lang, "driver_link_card_intro"),
+        parse_mode="HTML"
+    )
+    await state.set_state(PaymeStates.waiting_for_card)
+
+
+@driver_router.message(PaymeStates.waiting_for_card, F.text)
+async def link_card_number(message: Message, state: FSMContext, lang: str = "uz"):
+    """Karta raqami"""
+    async with AsyncSessionLocal() as db:
+        lang = await db_lang_for_telegram(db, message.from_user.id)
+    card_number = message.text.replace(" ", "")
+    
+    if not card_number.isdigit() or len(card_number) != 16:
+        await message.answer(get_text(lang, "driver_card_wrong_16"))
+        return
+    
+    await state.update_data(card_number=card_number)
+    
+    await message.answer(
+        get_text(lang, "driver_card_ok_expire")
+    )
+    await state.set_state(PaymeStates.waiting_for_expire)
+
+
+@driver_router.message(PaymeStates.waiting_for_expire, F.text)
+async def link_card_expire(message: Message, state: FSMContext, lang: str = "uz"):
+    """Karta muddati va SMS yuborish"""
+    async with AsyncSessionLocal() as db:
+        lang = await db_lang_for_telegram(db, message.from_user.id)
+    expire = message.text.replace("/", "").replace(" ", "")
+    
+    if not expire.isdigit() or len(expire) != 4:
+        await message.answer(get_text(lang, "driver_card_wrong_mmyy"))
+        return
+    
+    data = await state.get_data()
+    card_number = data["card_number"]
+    
+    try:
+        from app.services.payme_service import payme_service, PaymeError
+        
+        # Payme API'ga so'rov
+        result = await payme_service.create_card(card_number, expire)
+        
+        # Result - dict bo'lishi kerak
+        if not isinstance(result, dict):
+            logger.error(f"❌ Payme noto'g'ri javob: {result}")
+            await message.answer(
+                get_text(lang, "driver_payme_error")
+            )
+            await state.clear()
+            return
+        
+        temp_token = result.get("token")
+        phone = result.get("phone", "")
+        
+        if not temp_token:
+            logger.error(f"❌ Token yo'q: {result}")
+            await message.answer(
+                get_text(lang, "driver_payme_error")
+            )
+            await state.clear()
+            return
+        
+        await state.update_data(
+            temp_token=temp_token,
+            phone=phone
+        )
+        
+        await message.answer(
+            get_text(lang, "driver_sms_prompt", phone=phone or "N/A"),
+            parse_mode="HTML"
+        )
+        await state.set_state(PaymeStates.waiting_for_sms)
+        
+    except PaymeError as e:
+        logger.error(f"Payme xato: {e.message} (code: {e.code})")
+        await message.answer(
+            get_text(lang, "driver_payme_error_reason", reason=e.message)
+        )
+        await state.clear()
+    except Exception as e:
+        logger.error(f"Karta bog'lashda xato: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
+        await message.answer(
+            get_text(lang, "driver_generic_retry")
+        )
+        await state.clear()
+
+
+@driver_router.message(PaymeStates.waiting_for_sms, F.text)
+async def link_card_verify(message: Message, state: FSMContext, lang: str = "uz"):
+    """SMS kodni tasdiqlash"""
+    async with AsyncSessionLocal() as db:
+        lang = await db_lang_for_telegram(db, message.from_user.id)
+    sms_code = message.text.strip()
+    
+    if not sms_code.isdigit() or len(sms_code) != 6:
+        await message.answer(get_text(lang, "driver_sms_wrong_format"))
+        return
+    
+    data = await state.get_data()
+    temp_token = data["temp_token"]
+    
+    try:
+        from app.services.payme_service import payme_service
+        
+        card_token = await payme_service.verify_card(temp_token, sms_code)
+        
+        async with AsyncSessionLocal() as db:
+            user = await UserCRUD.get_by_telegram_id(db, message.from_user.id)
+            if not user:
+                await message.answer(get_text(lang, "driver_err_x"))
+                await state.clear()
+                return
+            
+            driver = await DriverCRUD.get_by_user_id(db, user.id)
+            if not driver:
+                await message.answer(get_text(lang, "driver_err_x"))
+                await state.clear()
+                return
+            
+            driver.payme_token = card_token
+            await db.commit()
+        
+        await state.clear()
+        
+        await message.answer(
+            get_text(lang, "driver_card_linked_ok"),
+            parse_mode="HTML"
+        )
+        
+        logger.info(f"Driver {driver.id} kartani bog'ladi")
+        
+    except Exception as e:
+        logger.error(f"SMS tasdiqlashda xato: {e}")
+        await message.answer(
+            get_text(lang, "driver_verify_error_detail", detail=str(e)[:100])
+        )
+        await state.clear()
+
+
+# ============================================
+# FINISH ORDER (SAFARNI YAKUNLASH)
+# ============================================
+
+@driver_router.callback_query(F.data.startswith("finish_order:"))
+async def finish_order(callback: CallbackQuery):
+    """Safarni yakunlash va xabarlarni to'g'ri taqsimlash"""
+    try:
+        order_id = int(callback.data.split(":")[1])
+        
+        async with AsyncSessionLocal() as db:
+            from app.crud.order_crud import OrderCRUD
+            order = await OrderCRUD.get_by_id(db, order_id)
+            
+            fin_lang = await db_lang_for_telegram(db, callback.from_user.id)
+            if not order or order.status == OrderStatus.COMPLETED:
+                await callback.answer(get_text(fin_lang, "driver_finish_order_closed"))
+                return
+
+            # 1. Yakuniy narx faqat taksometr (WebApp) tomonidan oldindan yozilishi kerak.
+            # Server qayta hisoblamaydi; final_price bo'lmasa — faqat WebApp orqali yakunlash.
+            fp = float(getattr(order, "final_price", None) or 0)
+            if fp <= 0:
+                await callback.answer(
+                    get_text(fin_lang, "driver_finish_need_taximeter"),
+                    show_alert=True,
+                )
+                return
+
+            order.status = OrderStatus.COMPLETED
+            now = datetime.now()
+            order.finished_at = now
+            order.completed_at = now  # Admin panel daily_stats uchun kerak
+            order.final_price = fp
+            dist_km = float(getattr(order, "distance_km", None) or 0)
+            logger.info(
+                f"Order {order_id} status changed to completed (bot callback), "
+                f"distance_km={dist_km}, final_price={fp}"
+            )
+
+            # Haydovchini yana bo'sh (available) qilish (explicit async - no order.driver lazy load)
+            driver = None
+            if order.driver_id:
+                driver = await DriverCRUD.get_by_id(db, order.driver_id)
+                if driver:
+                    driver.is_available = True
+
+            await db.commit()
+
+            # 2. Komissiyani haydovchi balansidan ayirish
+            from app.services.commission import deduct_commission_on_trip_complete
+            bonus_info = await deduct_commission_on_trip_complete(db, order)
+            used_bonus     = int(bonus_info.get("used_bonus", 0))
+            earned_cashback = int(bonus_info.get("earned_cashback", 0))
+            payable_amount  = int(bonus_info.get("payable_amount", 0))
+            commission_val  = int(bonus_info.get("commission", 0))
+
+            # 3. HAYDOVCHIGA XABAR — minimalist format
+            def _fmt(n: int) -> str:
+                return f"{n:,}".replace(",", " ")
+
+            final_price_int = int(fp)
+            if used_bonus > 0:
+                net_cash = final_price_int - used_bonus
+                balance_change = used_bonus - commission_val
+                driver_msg = (
+                    f"✅ <b>Safar yakunlandi!</b>\n"
+                    f"💵 Naqd: <b>{_fmt(net_cash)} so'm</b>\n"
+                    f"🎁 Bonus: <b>{_fmt(used_bonus)} so'm</b>\n"
+                    f"📉 Kom: <b>-{_fmt(commission_val)} so'm</b>\n"
+                    f"📈 Balans: <b>+{_fmt(balance_change)} so'm</b>"
+                )
+            else:
+                driver_msg = (
+                    f"✅ <b>Safar yakunlandi!</b>\n"
+                    f"💵 To'lov: <b>{_fmt(final_price_int)} so'm</b>\n"
+                    f"📉 Kom: <b>-{_fmt(commission_val)} so'm</b>"
+                )
+
+            await callback.message.edit_text(driver_msg, parse_mode="HTML")
+
+            # 4. MIJOZGA: FSM holatini tozalash + chek + bosh menyu (explicit async - no order.user lazy load)
+            try:
+                from aiogram.fsm.storage.base import StorageKey
+                from app.bot.telegram_bot import bot as telegram_bot, dp
+                from app.bot.messages import get_text
+                from app.bot.keyboards.main_menu import get_main_keyboard
+
+                order_user = await UserCRUD.get_by_id(db, order.user_id) if order.user_id else None
+                customer_telegram_id = getattr(order_user, "telegram_id", None) if order_user else None
+                if not customer_telegram_id:
+                    raise ValueError("Mijoz telegram_id topilmadi")
+                # State reset: mijoz FSM holatini to'liq tozalab, bosh holatga qaytarish
+                try:
+                    key = StorageKey(bot_id=telegram_bot.id, chat_id=customer_telegram_id, user_id=customer_telegram_id)
+                    user_fsm = FSMContext(storage=dp.storage, key=key)
+                    await user_fsm.clear()
+                except Exception as state_err:
+                    logger.warning(f"Mijoz FSM tozalashda xato: {state_err}")
+
+                user_lang = normalize_bot_lang(getattr(order_user, "language_code", None) or "uz")
+
+                from app.bot.tracking_message_cleanup import clear_user_tracking_message
+
+                tracking_mid = getattr(order, "user_tracking_message_id", None)
+                await clear_user_tracking_message(
+                    callback.bot, customer_telegram_id, tracking_mid
+                )
+
+                msg = (
+                    get_text(user_lang, "arrived_at_dest")
+                    + "\n\n"
+                    + get_text(user_lang, "trip_finished_thanks")
+                    + "\n\n"
+                    + get_text(
+                        user_lang,
+                        "user_final_bill",
+                        payable=payable_str,
+                        used=used_str,
+                        earned=earned_str,
+                    )
+                    + "\n\n"
+                    + get_text(user_lang, "rate_driver")
+                )
+                await callback.bot.send_message(
+                    chat_id=customer_telegram_id,
+                    text=msg,
+                    reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                        [InlineKeyboardButton(text="⭐ 1", callback_data=f"rate:1:{order.id}"),
+                         InlineKeyboardButton(text="⭐ 2", callback_data=f"rate:2:{order.id}"),
+                         InlineKeyboardButton(text="⭐ 3", callback_data=f"rate:3:{order.id}"),
+                         InlineKeyboardButton(text="⭐ 4", callback_data=f"rate:4:{order.id}"),
+                         InlineKeyboardButton(text="⭐ 5", callback_data=f"rate:5:{order.id}")]
+                    ]),
+                    parse_mode="HTML"
+                )
+                # Bosh menyu tugmalarini yuborish (Taksi chaqirish, Buyurtmalarim va hokazo)
+                main_kb = get_main_keyboard(user_lang)
+                await callback.bot.send_message(
+                    chat_id=customer_telegram_id,
+                    text=get_text(user_lang, "order_cancel_success"),
+                    reply_markup=main_kb
+                )
+            except Exception as e:
+                logger.error(f"Mijozga yakuniy xabar yuborishda xato: {e}")
+
+            await callback.answer(_get_text(driver_lang, "trip_completed_check"))
+
+    except Exception as e:
+        logger.error(f"❌ Safarni yakunlashda xato: {e}")
+        try:
+            async with AsyncSessionLocal() as _db:
+                _l = await db_lang_for_telegram(_db, callback.from_user.id)
+            await callback.answer(get_text(_l, "driver_err_fatal_short"), show_alert=True)
+        except Exception:
+            await callback.answer(get_text("uz", "driver_err_fatal_short"), show_alert=True)

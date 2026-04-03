@@ -1,0 +1,626 @@
+<!DOCTYPE html>
+<html lang="uz">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta http-equiv="Content-Security-Policy" content="default-src * 'unsafe-inline' 'unsafe-eval' data: blob:; font-src * data:; img-src * data:;">
+    <title>Admin Panel - Timgo Taxi</title>
+    <script>
+        window.addEventListener("error", function (event) {
+            var msg = String(event && event.message ? event.message : "");
+            var file = String(event && event.filename ? event.filename : "");
+            if (file.indexOf("global.js") !== -1 && msg.indexOf("className") !== -1) {
+                event.preventDefault();
+                return true;
+            }
+        });
+    </script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+    <style>
+        * { box-sizing: border-box; }
+        body { font-family: system-ui, -apple-system, sans-serif; margin: 0; background: #0f172a; color: #e2e8f0; }
+        /* Login screen */
+        .login-wrap { min-height: 100vh; display: flex; align-items: center; justify-content: center; padding: 16px; }
+        .login-card { background: #1e293b; border-radius: 12px; padding: 32px; max-width: 400px; width: 100%; }
+        .login-card h1 { margin: 0 0 24px; font-size: 1.5rem; }
+        /* Sidebar layout */
+        .admin-layout { display: flex; min-height: 100vh; }
+        .sidebar {
+            width: 220px; min-width: 220px; background: #0f172a; border-right: 1px solid #334155;
+            padding: 20px 0; flex-shrink: 0;
+        }
+        .sidebar-title { padding: 0 20px 20px; font-weight: 700; font-size: 1.1rem; color: #38bdf8; }
+        .sidebar-nav { display: flex; flex-direction: column; gap: 4px; }
+        .sidebar-item {
+            padding: 12px 20px; color: #94a3b8; cursor: pointer; border-left: 3px solid transparent;
+            transition: all 0.2s; text-decoration: none;
+        }
+        .sidebar-item:hover { background: #1e293b; color: #e2e8f0; }
+        .sidebar-item.active { background: #1e293b; color: #38bdf8; border-left-color: #2563eb; }
+        .sidebar-footer { margin-top: auto; padding: 20px; border-top: 1px solid #334155; }
+        .main-content { flex: 1; padding: 24px; overflow-x: auto; }
+        .main-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 24px; }
+        .main-header h2 { margin: 0; font-size: 1.25rem; }
+        /* Cards & forms */
+        .card { background: #1e293b; border-radius: 12px; padding: 24px; margin-bottom: 20px; }
+        .row { display: flex; gap: 16px; flex-wrap: wrap; }
+        .stat { flex: 1; min-width: 120px; padding: 20px; background: #334155; border-radius: 8px; }
+        .stat span { display: block; font-size: 1.75rem; font-weight: 700; color: #38bdf8; }
+        .stat small { color: #94a3b8; font-size: 0.85rem; }
+        input, button, textarea { padding: 10px 14px; border-radius: 8px; border: 1px solid #475569; font-size: 14px; }
+        input, textarea { background: #0f172a; color: #e2e8f0; width: 100%; }
+        button { background: #2563eb; color: white; border: none; cursor: pointer; font-weight: 600; }
+        button:hover { background: #1d4ed8; }
+        button.danger { background: #dc2626; }
+        button.danger:hover { background: #b91c1c; }
+        button.success { background: #16a34a; }
+        button.success:hover { background: #15803d; }
+        .form-group { margin-bottom: 16px; }
+        .form-group label { display: block; margin-bottom: 6px; font-size: 0.9rem; color: #94a3b8; }
+        table { width: 100%; border-collapse: collapse; }
+        th, td { padding: 12px; text-align: left; border-bottom: 1px solid #334155; }
+        th { color: #94a3b8; font-weight: 500; font-size: 0.85rem; }
+        .badge { padding: 4px 10px; border-radius: 6px; font-size: 0.8rem; }
+        .badge.green { background: #166534; }
+        .badge.red { background: #991b1b; }
+        .msg { padding: 12px 16px; border-radius: 8px; margin-bottom: 16px; }
+        .msg.err { background: #7f1d1d; }
+        .msg.ok { background: #14532d; }
+        .hidden { display: none !important; }
+    </style>
+</head>
+<body>
+<div id="loginScreen" class="login-wrap">
+    <div class="login-card">
+        <h1>Admin Panel</h1>
+        <p style="color:#94a3b8;font-size:0.9rem;margin-bottom:20px">Telegram ID va .env dagi ADMIN_PASSWORD orqali kirish</p>
+        <div class="form-group">
+            <label>Telegram ID</label>
+            <input type="text" id="loginTelegramId" placeholder="123456789" autocomplete="username">
+        </div>
+        <div class="form-group">
+            <label>Parol (ADMIN_PASSWORD)</label>
+            <input type="password" id="loginPassword" placeholder="Parol" autocomplete="current-password">
+        </div>
+        <div id="loginMsg" class="msg hidden"></div>
+        <button onclick="doLogin()" style="width:100%;margin-top:8px">Kirish</button>
+    </div>
+</div>
+
+<div id="mainScreen" class="hidden">
+    <div class="admin-layout">
+        <aside class="sidebar">
+            <div class="sidebar-title">Timgo Admin</div>
+            <nav class="sidebar-nav">
+                <a class="sidebar-item active" data-tab="dashboard">📊 Dashboard</a>
+                <a class="sidebar-item" data-tab="tariffs">💰 Tariflar</a>
+                <a class="sidebar-item" data-tab="drivers">🚕 Haydovchilar</a>
+                <a class="sidebar-item" data-tab="users">👥 Foydalanuvchilar</a>
+                <a class="sidebar-item" data-tab="logs">📋 Loglar</a>
+                <a class="sidebar-item" data-tab="message">✉️ Xabar yuborish</a>
+            </nav>
+            <div class="sidebar-footer">
+                <button onclick="logout()" style="width:100%;background:#334155">Chiqish</button>
+            </div>
+        </aside>
+        <main class="main-content">
+            <div id="mainMsg" class="msg hidden"></div>
+
+            <div id="dashboard" class="tab-content">
+                <div class="main-header"><h2>Dashboard</h2><span class="badge" style="background:#2563eb;font-size:0.7rem">V35.0 - ANALYTICS</span></div>
+                <div class="card">
+                    <div class="row" id="statsRow"></div>
+                </div>
+                <div class="card" style="margin-top: 20px;">
+                    <h3 style="margin: 0 0 16px; font-size: 1rem;">Oxirgi 7 kun — Daromad va buyurtmalar</h3>
+                    <div style="height: 280px; position: relative;">
+                        <canvas id="analyticsChart"></canvas>
+                    </div>
+                </div>
+                <div class="row" style="gap: 24px; margin-top: 20px;">
+                    <div class="card" style="flex: 1; min-width: 300px;">
+                        <h3 style="margin: 0 0 16px; font-size: 1rem;">Oxirgi 5 ta buyurtma</h3>
+                        <div id="recentOrdersTable"></div>
+                    </div>
+                    <div class="card" style="flex: 1; min-width: 300px;">
+                        <h3 style="margin: 0 0 16px; font-size: 1rem;">Eng faol 5 ta haydovchi</h3>
+                        <div id="topDriversTable"></div>
+                    </div>
+                </div>
+                <div class="row" style="gap: 24px; margin-top: 20px;">
+                    <div class="card" style="flex: 1; min-width: 300px;">
+                        <h3 style="margin: 0 0 16px; font-size: 1rem;">Top Users</h3>
+                        <div id="topUsersTable"></div>
+                    </div>
+                </div>
+            </div>
+
+            <div id="tariffs" class="tab-content hidden">
+                <div class="main-header"><h2>Tariflar</h2></div>
+                <div class="card">
+                    <div class="form-group"><label>Min narx (so'm)</label><input type="number" id="minPrice"></div>
+                    <div class="form-group"><label>Narx/km (so'm)</label><input type="number" id="pricePerKm"></div>
+                    <div class="form-group"><label>Komissiya (%)</label><input type="number" step="0.1" id="commissionRate"></div>
+                    <div class="form-group"><label>Surge ko'paytiruvchi</label><input type="number" step="0.1" id="surgeMult"></div>
+                    <div class="form-group"><label><input type="checkbox" id="surgeActive"> Surge faol</label></div>
+                    <div class="form-group"><label>Keshbek foizi (%)</label><input type="number" step="0.1" min="0" max="100" id="cashbackPercent"></div>
+                    <div class="form-group"><label>Maksimal bonus ishlatish (%)</label><input type="number" step="1" min="0" max="100" id="maxBonusUsagePercent"></div>
+                    <button onclick="saveTariffs()">Saqlash (Redis ham yangilanadi)</button>
+                </div>
+            </div>
+
+            <div id="drivers" class="tab-content hidden">
+                <div class="main-header"><h2>Haydovchilar</h2></div>
+                <div class="card">
+                    <div style="margin-bottom:16px;display:flex;gap:8px;">
+                      <input type="text" id="driverSearch" 
+                        placeholder="Ism, telefon yoki mashina raqami..."
+                        style="flex:1;padding:10px;border-radius:8px;
+                        border:1px solid #333;background:#1a1a1a;
+                        color:white;font-size:14px;"
+                        oninput="searchDrivers(this.value)">
+                      <button onclick="loadDrivers()" 
+                        style="padding:10px 16px;border-radius:8px;
+                        background:#276EF1;color:white;border:none;
+                        cursor:pointer;">🔍</button>
+                    </div>
+                    <div id="driversList"></div>
+                </div>
+            </div>
+
+            <div id="users" class="tab-content hidden">
+                <div class="main-header"><h2>Foydalanuvchilar</h2></div>
+                <div class="card"><div id="usersList"></div></div>
+            </div>
+
+            <div id="logs" class="tab-content hidden">
+                <div class="main-header"><h2>Loglar</h2></div>
+                <div class="card"><div id="logsList"></div></div>
+            </div>
+
+            <div id="message" class="tab-content hidden">
+                <div class="main-header"><h2>Haydovchiga xabar</h2></div>
+                <div class="card">
+                    <div class="form-group"><label>Haydovchi ID</label><input type="number" id="msgDriverId"></div>
+                    <div class="form-group"><label>Xabar</label><textarea id="msgText" rows="4"></textarea></div>
+                    <button onclick="sendMessage()">Yuborish</button>
+                </div>
+            </div>
+        </main>
+    </div>
+</div>
+
+<div id="driverModal" style="display:none;
+  position:fixed;inset:0;background:rgba(0,0,0,0.8);
+  z-index:9999;align-items:center;
+  justify-content:center;">
+  <div style="background:#1a1a1a;border-radius:16px;
+    padding:28px;max-width:480px;width:90%;
+    max-height:80vh;overflow-y:auto;
+    border:1px solid #333;">
+    <div style="display:flex;justify-content:space-between;
+      align-items:center;margin-bottom:20px;">
+      <h3 id="modalTitle" style="color:white;
+        font-size:18px;">Haydovchi</h3>
+      <button onclick="closeDriverModal()" 
+        style="background:none;border:none;
+        color:white;font-size:24px;cursor:pointer;">✕</button>
+    </div>
+    <div id="modalContent"></div>
+    <div style="display:flex;gap:8px;margin-top:20px;
+      flex-wrap:wrap;" id="modalActions"></div>
+  </div>
+</div>
+
+<script>
+const API = '/api/v1/admin';
+let token = localStorage.getItem('admin_token');
+
+function headers() {
+    const h = { 'Content-Type': 'application/json' };
+    if (token) h['Authorization'] = 'Bearer ' + token;
+    return h;
+}
+
+function showMsg(id, text, isErr) {
+    const el = document.getElementById(id);
+    if (!el) return;
+    el.className = 'msg ' + (isErr ? 'err' : 'ok');
+    el.textContent = text;
+    el.classList.remove('hidden');
+}
+
+async function parseErrorResponse(r) {
+    const text = await r.text();
+    try {
+        const j = JSON.parse(text);
+        if (j.detail) return Array.isArray(j.detail) ? j.detail.join(', ') : String(j.detail);
+        return 'Xato';
+    } catch (_) {
+        return text && text.length < 100 ? text : (r.status === 500 ? 'Server xatosi (500)' : 'Xato');
+    }
+}
+
+async function doLogin() {
+    const val = document.getElementById('loginTelegramId').value.trim();
+    const pass = document.getElementById('loginPassword').value;
+    if (!val || !pass) { showMsg('loginMsg', 'Telegram ID va parol kiriting', true); return; }
+    const tid = parseInt(val, 10);
+    if (isNaN(tid)) { showMsg('loginMsg', 'Telegram ID raqam bo\'lishi kerak', true); return; }
+    try {
+        const r = await fetch(API + '/login', {
+            method: 'POST',
+            headers: headers(),
+            body: JSON.stringify({ telegram_id: tid, password: pass })
+        });
+        const j = await r.json();
+        if (!r.ok) { showMsg('loginMsg', j.detail || 'Xato', true); return; }
+        token = j.access_token;
+        localStorage.setItem('admin_token', token);
+        document.getElementById('loginScreen').classList.add('hidden');
+        document.getElementById('mainScreen').classList.remove('hidden');
+        document.getElementById('loginMsg').classList.add('hidden');
+        showTab('dashboard');
+    } catch (e) { showMsg('loginMsg', 'Server xatosi: ' + e.message, true); }
+}
+
+function logout() {
+    token = null;
+    localStorage.removeItem('admin_token');
+    document.getElementById('mainScreen').classList.add('hidden');
+    document.getElementById('loginScreen').classList.remove('hidden');
+}
+
+function showTab(name) {
+    document.querySelectorAll('.sidebar-item').forEach(x => x.classList.remove('active'));
+    document.querySelectorAll('.tab-content').forEach(x => x.classList.add('hidden'));
+    const item = document.querySelector('[data-tab="'+name+'"]');
+    const pane = document.getElementById(name);
+    if (item) item.classList.add('active');
+    if (pane) { pane.classList.remove('hidden'); loadTab(name); }
+}
+
+document.querySelectorAll('.sidebar-item').forEach(el => {
+    el.onclick = (e) => { e.preventDefault(); showTab(el.dataset.tab); };
+});
+
+async function loadTab(name) {
+    if (name === 'dashboard') loadStats();
+    else if (name === 'tariffs') loadTariffs();
+    else if (name === 'drivers') loadDrivers();
+    else if (name === 'users') loadUsers();
+    else if (name === 'logs') loadLogs();
+}
+
+async function loadStats() {
+    try {
+        const r = await fetch(API + '/stats', { headers: headers() });
+        if (r.status === 401) { logout(); return; }
+        const s = await r.json();
+        document.getElementById('statsRow').innerHTML = `
+            <div class="stat"><span>${s.total_users}</span><small>Foydalanuvchilar</small></div>
+            <div class="stat"><span>${s.total_drivers}</span><small>Haydovchilar</small></div>
+            <div class="stat"><span>${s.active_drivers}</span><small>Faol haydovchilar</small></div>
+            <div class="stat"><span>${s.total_orders}</span><small>Jami buyurtmalar</small></div>
+            <div class="stat"><span>${s.active_orders}</span><small>Aktiv buyurtmalar</small></div>
+            <div class="stat"><span>${(s.revenue||0).toLocaleString()}</span><small>Jami tushum (so'm)</small></div>
+            <div class="stat"><span>${(s.profit||0).toLocaleString()}</span><small>Sof foyda / Komissiya (so'm)</small></div>
+        `;
+        const drivers = s.top_drivers || [];
+        const users = s.top_users || [];
+        const recent = s.recent_orders || [];
+        const daily = s.daily_stats || [];
+        let driversHtml = drivers.length ? '<table><tr><th>Ism</th><th>Buyurtma soni</th><th>Reyting</th></tr>' + drivers.map(d => `<tr><td>${d.name}</td><td>${d.completed_orders}</td><td>${(d.rating||5).toFixed(1)}</td></tr>`).join('') + '</table>' : '<p style="color:#94a3b8">Ma\'lumot yo\'q</p>';
+        let usersHtml = users.length ? '<table><tr><th>Ism</th><th>Telefon</th><th>Jami sarflagan (so\'m)</th></tr>' + users.map(u => `<tr><td>${u.name}</td><td>${u.phone || '-'}</td><td>${(u.total_spent||0).toLocaleString()}</td></tr>`).join('') + '</table>' : '<p style="color:#94a3b8">Ma\'lumot yo\'q</p>';
+        let recentHtml = recent.length ? '<table><tr><th>Mijoz</th><th>Haydovchi</th><th>Narx</th><th>Status</th></tr>' + recent.map(r => `<tr><td>${r.client_name}</td><td>${r.driver_name || '-'}</td><td>${r.price != null ? r.price.toLocaleString() : '-'}</td><td><span class="badge">${r.status}</span></td></tr>`).join('') + '</table>' : '<p style="color:#94a3b8">Ma\'lumot yo\'q</p>';
+        document.getElementById('topDriversTable').innerHTML = driversHtml;
+        document.getElementById('topUsersTable').innerHTML = usersHtml;
+        document.getElementById('recentOrdersTable').innerHTML = recentHtml;
+        renderChart(daily);
+    } catch (e) { document.getElementById('statsRow').innerHTML = '<p>Xato: ' + e.message + '</p>'; }
+}
+
+let chartInstance = null;
+function renderChart(dailyStats) {
+    const ctx = document.getElementById('analyticsChart');
+    if (!ctx) return;
+    if (chartInstance) chartInstance.destroy();
+    const labels = (dailyStats || []).map(d => d.date);
+    const revenueData = (dailyStats || []).map(d => d.revenue || 0);
+    const ordersData = (dailyStats || []).map(d => d.order_count || 0);
+    chartInstance = new Chart(ctx, {
+        type: 'line',
+        data: {
+            labels: labels,
+            datasets: [
+                { label: 'Daromad (so\'m)', data: revenueData, borderColor: '#38bdf8', backgroundColor: 'rgba(56,189,248,0.1)', fill: true, tension: 0.3, yAxisID: 'y' },
+                { label: 'Buyurtmalar soni', data: ordersData, borderColor: '#22c55e', backgroundColor: 'rgba(34,197,94,0.1)', fill: true, tension: 0.3, yAxisID: 'y1' }
+            ]
+        },
+        options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            plugins: { legend: { labels: { color: '#94a3b8' } } },
+            scales: {
+                x: { ticks: { color: '#94a3b8' }, grid: { color: 'rgba(148,163,184,0.1)' } },
+                y: { type: 'linear', position: 'left', ticks: { color: '#94a3b8' }, grid: { color: 'rgba(148,163,184,0.1)' } },
+                y1: { type: 'linear', position: 'right', ticks: { color: '#94a3b8' }, grid: { drawOnChartArea: false } }
+            }
+        }
+    });
+}
+
+async function loadTariffs() {
+    try {
+        const r = await fetch(API + '/settings', { headers: headers() });
+        if (r.status === 401) { logout(); return; }
+        const s = await r.json();
+        document.getElementById('minPrice').value = s.min_price;
+        document.getElementById('pricePerKm').value = s.price_per_km;
+        document.getElementById('commissionRate').value = s.commission_rate;
+        document.getElementById('surgeMult').value = s.surge_multiplier;
+        document.getElementById('surgeActive').checked = s.is_surge_active;
+        // Yangi bonus/keshbek maydonlari, undefined/null bo'lsa 0 qilib ko'rsatamiz
+        const cb = (typeof s.cashback_percent === 'number' && isFinite(s.cashback_percent)) ? s.cashback_percent : 0;
+        const maxB = (typeof s.max_bonus_usage_percent === 'number' && isFinite(s.max_bonus_usage_percent)) ? s.max_bonus_usage_percent : 0;
+        const cbInput = document.getElementById('cashbackPercent');
+        const maxBInput = document.getElementById('maxBonusUsagePercent');
+        if (cbInput) cbInput.value = cb;
+        if (maxBInput) maxBInput.value = maxB;
+    } catch (e) { showMsg('mainMsg', 'Tariflar yuklanmadi: ' + e.message, true); }
+}
+
+async function saveTariffs() {
+    try {
+        const body = {
+            min_price: parseFloat(document.getElementById('minPrice').value),
+            price_per_km: parseFloat(document.getElementById('pricePerKm').value),
+            commission_rate: parseFloat(document.getElementById('commissionRate').value),
+            surge_multiplier: parseFloat(document.getElementById('surgeMult').value),
+            is_surge_active: document.getElementById('surgeActive').checked
+        };
+        const cbRaw = parseFloat(document.getElementById('cashbackPercent').value);
+        const maxBRaw = parseFloat(document.getElementById('maxBonusUsagePercent').value);
+        body.cashback_percent = Number.isFinite(cbRaw) ? cbRaw : 0;
+        body.max_bonus_usage_percent = Number.isFinite(maxBRaw) ? maxBRaw : 0;
+
+        const r = await fetch(API + '/settings', {
+            method: 'PUT',
+            headers: headers(),
+            body: JSON.stringify(body)
+        });
+        if (r.status === 401) { logout(); return; }
+        if (!r.ok) {
+            let errMsg = 'Saqlashda xato: ' + r.status;
+            try {
+                const errData = await r.json();
+                if (errData.detail) errMsg = errData.detail;
+            } catch(_) {}
+            showMsg('mainMsg', errMsg, true);
+            return;
+        }
+        showMsg('mainMsg', 'Saqlandi!', false);
+        await loadTariffs();
+    } catch (e) { showMsg('mainMsg', 'Xato: ' + e.message, true); }
+}
+
+var searchTimeout;
+function searchDrivers(val) {
+    clearTimeout(searchTimeout);
+    searchTimeout = setTimeout(function() {
+        loadDrivers(val);
+    }, 400);
+}
+
+async function loadDrivers(search) {
+    try {
+        var url = API + '/drivers?limit=100';
+        if (search && search.trim()) {
+            url += '&search=' + encodeURIComponent(search.trim());
+        } else {
+            var v = (document.getElementById('driverSearch') || {}).value;
+            if (v && v.trim()) url += '&search=' + encodeURIComponent(v.trim());
+        }
+        const r = await fetch(url, { headers: headers() });
+        if (r.status === 401) { logout(); return; }
+        const list = await r.json();
+        let html = '<table><tr><th>ID</th><th>Ism</th><th>Tel</th><th>Mashina</th><th>Balans</th><th>Status</th><th>Komissiya</th><th></th></tr>';
+        for (const d of list) {
+            const st = d.is_active ? '<span class="badge green">Aktiv</span>' : '<span class="badge red">Blok</span>';
+            const verified = d.is_verified ? '✅' : '❌';
+            const comm = d.commission_rate != null ? (d.commission_rate + '%') : 'Global';
+            html += '<tr style="cursor:pointer" onclick="openDriverModal(' + d.id + ')">' +
+                '<td>' + d.id + '</td>' +
+                '<td>' + (d.first_name||'-') + '</td>' +
+                '<td>' + (d.phone||'-') + '</td>' +
+                '<td>' + (d.car_model||'') + ' ' + (d.car_number||'') + '</td>' +
+                '<td>' + ((d.balance||0).toLocaleString ? (d.balance||0).toLocaleString() : (d.balance||0)) + '</td>' +
+                '<td>' + st + ' ' + verified + '</td>' +
+                '<td>' + comm + '</td>' +
+                '<td><button onclick="event.stopPropagation(); openDriverModal(' + d.id + ')" style="padding:6px 10px;border-radius:8px;background:#334155;color:#e2e8f0;border:none;cursor:pointer;">📋</button></td>' +
+                '</tr>';
+        }
+        html += '</table>';
+        document.getElementById('driversList').innerHTML = html || '<p>Haydovchilar yo\'q</p>';
+    } catch (e) { document.getElementById('driversList').innerHTML = '<p>Xato: ' + e.message + '</p>'; }
+}
+
+async function openDriverModal(driverId) {
+    document.getElementById('driverModal').style.display = 'flex';
+    document.getElementById('modalContent').innerHTML = '<p style="color:#888">Yuklanmoqda...</p>';
+    document.getElementById('modalActions').innerHTML = '';
+    try {
+        const r = await fetch(API + '/drivers/' + driverId, { headers: headers() });
+        if (r.status === 401) { logout(); return; }
+        const d = await r.json();
+        document.getElementById('modalTitle').textContent = ((d.first_name||'') + ' ' + (d.last_name||'')).trim() || 'Haydovchi';
+        document.getElementById('modalContent').innerHTML =
+            '<div style="display:grid;gap:12px;">' +
+            '<div><span style="color:#888">📱 Telefon:</span> <strong style="color:white">' + (d.phone||'-') + '</strong></div>' +
+            '<div><span style="color:#888">🚗 Mashina:</span> <strong style="color:white">' + (d.car_model||'-') + ' ' + (d.car_number||'') + '</strong></div>' +
+            '<div><span style="color:#888">⭐ Reyting:</span> <strong style="color:white">' + (Number(d.rating||5).toFixed(1)) + '/5.0</strong></div>' +
+            '<div><span style="color:#888">🚕 Safarlar:</span> <strong style="color:white">' + (d.completed_trips||0) + ' ta</strong></div>' +
+            '<div><span style="color:#888">💰 Daromad:</span> <strong style="color:white">' + ((d.total_earnings||0).toLocaleString ? (d.total_earnings||0).toLocaleString() : (d.total_earnings||0)) + ' so&#39;m</strong></div>' +
+            '<div><span style="color:#888">💳 Balans:</span> <strong style="color:white">' + ((d.balance||0).toLocaleString ? (d.balance||0).toLocaleString() : (d.balance||0)) + ' so&#39;m</strong></div>' +
+            '<div><span style="color:#888">📊 Komissiya:</span><br>' +
+                '<input type="number" id="commInput" value="' + (d.commission_rate!=null ? d.commission_rate : '') + '" ' +
+                'placeholder="Global (bo&#39;sh qoldiring)" min="0" max="100" step="0.5" ' +
+                'style="width:100%;padding:8px;margin-top:4px;border-radius:8px;border:1px solid #444;background:#111;color:white;font-size:14px;">' +
+                '<small style="color:#888">Bo&#39;sh = global komissiya ishlatiladi</small></div>' +
+            '<div><span style="color:#888">📝 Admin eslatma:</span><br>' +
+                '<textarea id="notesInput" rows="3" placeholder="Eslatma..." ' +
+                'style="width:100%;padding:8px;margin-top:4px;border-radius:8px;border:1px solid #444;background:#111;color:white;font-size:14px;resize:vertical;">' +
+                (d.admin_notes||'') + '</textarea></div>' +
+            '</div>';
+
+        document.getElementById('modalActions').innerHTML =
+            '<button class="success" onclick="saveDriverChanges(' + d.id + ')" style="padding:10px 14px;">💾 Saqlash</button>' +
+            (d.is_verified
+                ? '<button onclick="unverifyDriver(' + d.id + ')" style="padding:10px 14px;background:#334155;color:#e2e8f0;border:none;border-radius:8px;cursor:pointer;font-weight:600;">❌ Tasdiqni olish</button>'
+                : '<button onclick="verifyDriver(' + d.id + ')" style="padding:10px 14px;background:#276EF1;color:white;border:none;border-radius:8px;cursor:pointer;font-weight:600;">✅ Tasdiqlash</button>') +
+            (d.is_active
+                ? '<button class="danger" onclick="blockDriver(' + d.id + ')" style="padding:10px 14px;">🚫 Bloklash</button>'
+                : '<button class="success" onclick="activateDriver(' + d.id + ')" style="padding:10px 14px;">✅ Aktivlashtirish</button>');
+    } catch(e) {
+        document.getElementById('modalContent').innerHTML = '<p style="color:red">Xato: ' + e.message + '</p>';
+    }
+}
+
+function closeDriverModal() {
+    document.getElementById('driverModal').style.display = 'none';
+    loadDrivers();
+}
+
+async function saveDriverChanges(driverId) {
+    var commVal = document.getElementById('commInput').value;
+    var notes = document.getElementById('notesInput').value;
+    var body = {};
+    if (commVal !== '') {
+        body.commission_rate = parseFloat(commVal);
+    } else {
+        body.commission_rate = null;
+    }
+    body.admin_notes = notes;
+    try {
+        const r = await fetch(API + '/drivers/' + driverId, {
+            method: 'PATCH',
+            headers: headers(),
+            body: JSON.stringify(body)
+        });
+        if (r.status === 401) { logout(); return; }
+        if (r.ok) {
+            showMsg('mainMsg', 'Saqlandi! ✅', false);
+            closeDriverModal();
+        } else {
+            const err = await parseErrorResponse(r);
+            showMsg('mainMsg', err || 'Xato', true);
+        }
+    } catch(e) {
+        showMsg('mainMsg', e.message, true);
+    }
+}
+
+async function verifyDriver(id) {
+    const r = await fetch(API + '/drivers/' + id + '/verify', { method: 'POST', headers: headers() });
+    if (r.ok) {
+        showMsg('mainMsg', 'Tasdiqlandi ✅', false);
+        closeDriverModal();
+    } else {
+        const err = await parseErrorResponse(r);
+        showMsg('mainMsg', err || 'Xato', true);
+    }
+}
+
+async function unverifyDriver(id) {
+    const r = await fetch(API + '/drivers/' + id + '/unverify', { method: 'POST', headers: headers() });
+    if (r.ok) {
+        showMsg('mainMsg', "Tasdiq olindi", false);
+        closeDriverModal();
+    } else {
+        const err = await parseErrorResponse(r);
+        showMsg('mainMsg', err || 'Xato', true);
+    }
+}
+
+async function blockDriver(id) {
+    if (!confirm('Bloklashni tasdiqlaysizmi? admin_logs ga yoziladi.')) return;
+    try {
+        const r = await fetch(API + '/drivers/'+id+'/block', { method: 'POST', headers: headers() });
+        if (r.ok) { showMsg('mainMsg', 'Bloklandi', false); loadDrivers(); } else {
+            const msg = await parseErrorResponse(r);
+            showMsg('mainMsg', msg, true);
+        }
+    } catch (e) { showMsg('mainMsg', e.message || 'Xato', true); }
+}
+
+async function activateDriver(id) {
+    try {
+        const r = await fetch(API + '/drivers/'+id+'/activate', { method: 'POST', headers: headers() });
+        if (r.ok) { showMsg('mainMsg', 'Aktivlashtirildi', false); loadDrivers(); } else {
+            const msg = await parseErrorResponse(r);
+            showMsg('mainMsg', msg, true);
+        }
+    } catch (e) { showMsg('mainMsg', e.message || 'Xato', true); }
+}
+
+async function loadUsers() {
+    try {
+        const r = await fetch(API + '/users?limit=100', { headers: headers() });
+        if (r.status === 401) { logout(); return; }
+        const list = await r.json();
+        let html = '<table><tr><th>ID</th><th>Telegram ID</th><th>Ism</th><th>Tel</th><th>Til</th><th>Role</th></tr>';
+        const langMap = { uz: 'O\'zbekcha', ru: 'Русский', uz_cyrl: 'Ўзбекча' };
+        for (const u of list) html += `<tr><td>${u.id}</td><td>${u.telegram_id}</td><td>${u.first_name||'-'}</td><td>${u.phone||'-'}</td><td>${langMap[u.language_code]||u.language_code||'-'}</td><td>${u.role}</td></tr>`;
+        html += '</table>';
+        document.getElementById('usersList').innerHTML = html || '<p>Foydalanuvchilar yo\'q</p>';
+    } catch (e) { document.getElementById('usersList').innerHTML = '<p>Xato: ' + e.message + '</p>'; }
+}
+
+async function loadLogs() {
+    try {
+        const r = await fetch(API + '/logs?limit=50', { headers: headers() });
+        if (r.status === 401) { logout(); return; }
+        const list = await r.json();
+        let html = '<table><tr><th>ID</th><th>Admin</th><th>Action</th><th>Details</th><th>Sana</th></tr>';
+        for (const l of list) html += `<tr><td>${l.id}</td><td>${l.admin_user_id||'-'}</td><td>${l.action}</td><td>${l.details ? JSON.stringify(l.details) : '-'}</td><td>${l.created_at||'-'}</td></tr>`;
+        html += '</table>';
+        document.getElementById('logsList').innerHTML = html || '<p>Loglar yo\'q</p>';
+    } catch (e) { document.getElementById('logsList').innerHTML = '<p>Xato: ' + e.message + '</p>'; }
+}
+
+async function sendMessage() {
+    const driverId = document.getElementById('msgDriverId').value;
+    const msg = document.getElementById('msgText').value.trim();
+    if (!driverId || !msg) { showMsg('mainMsg', 'Haydovchi ID va xabar kiriting', true); return; }
+    try {
+        const r = await fetch(API + '/send-message', {
+            method: 'POST',
+            headers: headers(),
+            body: JSON.stringify({ driver_id: parseInt(driverId), message: msg })
+        });
+        if (r.status === 401) { logout(); return; }
+        const j = await r.json();
+        if (r.ok) { showMsg('mainMsg', 'Yuborildi', false); } else { showMsg('mainMsg', j.detail||'Xato', true); }
+    } catch (e) { showMsg('mainMsg', e.message, true); }
+}
+
+(async function initAuth() {
+    if (!token) return;
+    try {
+        const r = await fetch(API + '/stats', { headers: headers() });
+        if (r.status === 401) {
+            token = null;
+            localStorage.removeItem('admin_token');
+            return;
+        }
+        document.getElementById('loginScreen').classList.add('hidden');
+        document.getElementById('mainScreen').classList.remove('hidden');
+        showTab('dashboard');
+    } catch (_) {
+        token = null;
+        localStorage.removeItem('admin_token');
+    }
+})();
+</script>
+</body>
+</html>

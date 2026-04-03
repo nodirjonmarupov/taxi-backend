@@ -1,0 +1,619 @@
+"""
+WebApp API routes
+"""
+import json
+from pathlib import Path
+from typing import Optional, Any
+from datetime import datetime
+from fastapi import APIRouter, Depends, HTTPException, Header, Query
+from fastapi.responses import JSONResponse
+from sqlalchemy import text, select
+from sqlalchemy.ext.asyncio import AsyncSession
+from pydantic import BaseModel
+
+from app.core.database import get_db
+from app.core.redis import get_redis
+from app.utils.webapp_token import verify_webapp_token
+from app.services.driver_location_cache import set_driver_location, get_driver_location as get_driver_location_redis
+from sqlalchemy.orm import selectinload
+
+from app.crud.order_crud import OrderCRUD
+from app.crud.user import UserCRUD, DriverCRUD
+from app.services.settings_service import get_settings
+from app.utils.trip_finish import sanitize_distance_km, parse_client_final_price
+from app.services.taximeter_service import accumulate_order_distance_for_driver
+from app.models.order import Order, OrderStatus
+from app.core.logger import get_logger
+
+logger = get_logger(__name__)
+
+router = APIRouter(prefix="/api/webapp", tags=["webapp"])
+
+def _valid_coord(lat: float, lon: float) -> bool:
+    """Koordinata yaxlit va Yer sirtida ekanligini tekshir."""
+    return -90 <= lat <= 90 and -180 <= lon <= 180
+
+def _parse_coords(lat, lon):
+    """Koordinatalarni parse qiladi. Noto'g'ri bo'lsa None qaytaradi (mock yo'q)."""
+    try:
+        la, lo = float(lat), float(lon)
+        if _valid_coord(la, lo):
+            return la, lo
+    except (TypeError, ValueError):
+        pass
+    return None
+
+def _sanitize_distance(km) -> float:
+    """1000 km dan oshsa 0 (ngrok/IP xato koordinata)"""
+    return sanitize_distance_km(km)
+
+
+@router.get("/tariff")
+async def get_tariff(db: AsyncSession = Depends(get_db)):
+    """Taximeter uchun tarif (startPrice, pricePerKm, pricePerMinWaiting, minDistanceUpdate)."""
+    from app.services.settings_service import get_settings
+    s = await get_settings(db)
+    return {
+        "startPrice": int(s.min_price),
+        "pricePerKm": int(s.price_per_km),
+        "pricePerMinWaiting": 500,
+        "minDistanceUpdate": 0.02,
+        "surge_multiplier": s.surge_multiplier,
+        "is_surge_active": s.is_surge_active,
+    }
+
+
+@router.get("/order/{order_id}")
+async def get_order_for_webapp(
+    order_id: int,
+    token: Optional[str] = Header(None, alias="X-WebApp-Token"),
+    qtoken: Optional[str] = Query(None, alias="token"),
+    db: AsyncSession = Depends(get_db)
+):
+    try:
+        t = token or qtoken
+        if t:
+            data = verify_webapp_token(t, order_id)
+            if not data:
+                logger.warning(
+                    "❌ WebApp token rad etildi: order_id=%s  "
+                    "(verify_webapp_token None qaytardi — log'da sabab bor)",
+                    order_id,
+                )
+                raise HTTPException(
+                    status_code=403,
+                    detail="Invalid or expired WebApp token. Iltimos, taximeterni qayta oching.",
+                )
+            _, driver_id = data
+        else:
+            driver_id = None
+
+        logger.info(f"📱 WebApp: Order {order_id} ma'lumotlari so'ralmoqda")
+        order = await OrderCRUD.get_by_id(db, order_id)
+
+        if not order:
+            raise HTTPException(status_code=404, detail="Order not found")
+
+        if driver_id is not None and getattr(order, "driver_id", None) != driver_id:
+            logger.warning(
+                "❌ WebApp: driver_id mos emas — token_driver=%s, order.driver_id=%s, order=%s",
+                driver_id, getattr(order, "driver_id", None), order_id,
+            )
+            raise HTTPException(status_code=403, detail="Access denied: not your order")
+
+        user_id = getattr(order, "user_id", None)
+        user = await UserCRUD.get_by_id(db, user_id) if user_id else None
+
+        pick_result = _parse_coords(
+            getattr(order, "pickup_latitude", None),
+            getattr(order, "pickup_longitude", None)
+        )
+        if pick_result is None:
+            raise HTTPException(status_code=400, detail="Invalid pickup coordinates")
+        pick_lat, pick_lon = pick_result
+
+        dest_result = _parse_coords(
+            getattr(order, "destination_latitude", None),
+            getattr(order, "destination_longitude", None)
+        )
+        dest_lat, dest_lon = (dest_result if dest_result else (pick_lat, pick_lon))
+
+        # Barcha maydonlarni str/float qilib qaytarish (500 xatoni oldini olish)
+        status_val = order.status
+        if hasattr(status_val, 'value'):
+            status_val = status_val.value
+        try:
+            est = float(order.estimated_price or 0)
+        except (TypeError, ValueError):
+            est = 0.0
+        try:
+            dist = float(_sanitize_distance(order.distance_km))
+        except (TypeError, ValueError):
+            dist = 0.0
+        logger.info(f"📍 XARITA KOORDINATLARI | order_id={order.id} | pickup_lat={pick_lat} | pickup_lon={pick_lon} | mijoz nuqtasiga center")
+        print(f"[ORDER] order_id={order.id} qabul qilindi | pickup_lat={pick_lat} | pickup_lon={pick_lon} | ORDER_DATA.pickup_latitude ishlatiladi")
+        driver_id = getattr(order, "driver_id", None)
+        return {
+            "id": int(order.id),
+            "status": str(status_val),
+            "driver_id": int(driver_id) if driver_id is not None else None,
+            "customer_name": str(user.first_name if user and user.first_name else "Mijoz"),
+            "customer_phone": str(user.phone if user and user.phone else "N/A"),
+            "pickup_latitude": float(pick_lat),
+            "pickup_longitude": float(pick_lon),
+            "pickup_address": str(order.pickup_address or "N/A"),
+            "destination_latitude": float(dest_lat),
+            "destination_longitude": float(dest_lon),
+            "estimated_price": est,
+            "distance_km": dist
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"❌ Order GET xatosi: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+def _validate_status_transition(current: str, new_status: str, mapped: Any) -> None:
+    """Status o'tishini tekshirish. Noto'g'ri bo'lsa HTTPException."""
+    allowed = {
+        "accepted": ["arrived", "started", "in_progress", "cancelled"],
+        "in_progress": ["completed", "cancelled"],
+        "pending": ["cancelled"],
+    }
+    cur = current.lower() if isinstance(current, str) else str(current)
+    new_lower = new_status.lower()
+    valid = allowed.get(cur, [])
+    if new_lower not in valid and new_lower != cur:
+        raise HTTPException(status_code=400, detail=f"Invalid status transition: {cur} -> {new_lower}")
+
+@router.post("/order/{order_id}/status")
+async def update_order_status(
+    order_id: int,
+    new_status: str,
+    distance_km: Optional[float] = None,
+    final_price: Optional[float] = None,
+    lat: Optional[float] = Query(None),
+    lon: Optional[float] = Query(None),
+    token: Optional[str] = Header(None, alias="X-WebApp-Token"),
+    qtoken: Optional[str] = Query(None, alias="token"),
+    db: AsyncSession = Depends(get_db)
+):
+    try:
+        t = token or qtoken
+        if not t:
+            raise HTTPException(status_code=403, detail="WebApp token required")
+        data = verify_webapp_token(t, order_id)
+        if not data:
+            raise HTTPException(status_code=403, detail="Invalid or expired WebApp token")
+        _, driver_id = data
+
+        logger.info(f"📱 WebApp: Order {order_id} status yangilanmoqda: {new_status} (driver={driver_id})")
+        order = await OrderCRUD.get_by_id_for_update(db, order_id)
+        if not order:
+            raise HTTPException(status_code=404, detail="Order not found")
+
+        ord_driver = getattr(order, "driver_id", None)
+        if ord_driver != driver_id:
+            raise HTTPException(status_code=403, detail="Access denied: only assigned driver can update")
+
+        cur_status = (order.status.value if hasattr(order.status, "value") else order.status) or ""
+
+        # Idempotent: takroriy "completed" — komissiya va xabarlar qayta ishlamaydi
+        if new_status.lower() == "completed" and str(cur_status).lower() == "completed":
+            logger.info(f"📱 WebApp: Order {order_id} allaqachon completed — idempotent javob")
+            return {"success": True, "status": "completed", "idempotent": True}
+
+        status_map = {
+            "arrived": OrderStatus.ACCEPTED,
+            "started": OrderStatus.IN_PROGRESS,
+            "in_progress": OrderStatus.IN_PROGRESS,
+            "completed": OrderStatus.COMPLETED,
+            "cancelled": OrderStatus.CANCELLED
+        }
+        mapped_status = status_map.get(new_status.lower(), OrderStatus.IN_PROGRESS)
+        _validate_status_transition(cur_status, new_status.lower(), mapped_status)
+
+        sanitized_dist = _sanitize_distance(distance_km) if distance_km is not None else None
+        now = datetime.utcnow()
+
+        apply_taximeter_start = (
+            mapped_status == OrderStatus.IN_PROGRESS
+            and str(cur_status).lower() == "accepted"
+        )
+        trip_lat = lat
+        trip_lon = lon
+        if apply_taximeter_start and (trip_lat is None or trip_lon is None) and getattr(order, "driver_id", None):
+            drv = await DriverCRUD.get_by_id(db, order.driver_id)
+            if drv:
+                if trip_lat is None:
+                    trip_lat = getattr(drv, "current_latitude", None)
+                if trip_lon is None:
+                    trip_lon = getattr(drv, "current_longitude", None)
+        if trip_lat is not None:
+            trip_lat = float(trip_lat)
+        if trip_lon is not None:
+            trip_lon = float(trip_lon)
+        if apply_taximeter_start and trip_lat is not None and trip_lon is not None:
+            if not _valid_coord(trip_lat, trip_lon):
+                trip_lat, trip_lon = None, None
+
+        resolved_final: Optional[float] = None
+        if mapped_status == OrderStatus.COMPLETED:
+            # Narx faqat taksometr (WebApp) dan — server qayta hisoblamaydi
+            resolved_final = parse_client_final_price(final_price)
+            if resolved_final is None:
+                raise HTTPException(
+                    status_code=400,
+                    detail="final_price kerak: taksometr yakuniy narxi (musbat son) query parametri sifatida yuborilishi shart.",
+                )
+            if distance_km is not None:
+                sanitized_dist = sanitize_distance_km(distance_km)
+            else:
+                sanitized_dist = float(getattr(order, "distance_km", None) or 0.0)
+
+        updated_order = await OrderCRUD.update_status(
+            db,
+            order_id,
+            mapped_status,
+            distance_km=sanitized_dist,
+            final_price=resolved_final if mapped_status == OrderStatus.COMPLETED else None,
+            updated_at=now,
+            apply_taximeter_start=apply_taximeter_start,
+            trip_start_lat=trip_lat,
+            trip_start_lon=trip_lon,
+        )
+
+        # Safar yakunlanganda komissiya ayirish va xabarlar + FSM ni tozalab, mijozni bosh menyuga qaytarish
+        if mapped_status == OrderStatus.COMPLETED and updated_order:
+            from app.services.commission import deduct_commission_on_trip_complete
+            from app.bot.messages import get_text
+            from aiogram.fsm.storage.base import StorageKey
+            from aiogram.fsm.context import FSMContext
+            from app.bot.keyboards.main_menu import get_main_keyboard
+
+            # Fetch user and driver BEFORE deduct_commission (avoids MissingGreenlet after commit)
+            user = await UserCRUD.get_by_id(db, order.user_id)
+            driver = await DriverCRUD.get_by_id(db, order.driver_id)
+            driver_user = await UserCRUD.get_by_id(db, driver.user_id) if driver and driver.user_id else None
+
+            user_telegram_id = getattr(user, "telegram_id", None) if user else None
+            driver_telegram_id = getattr(driver_user, "telegram_id", None) if driver_user else None
+            user_lang = getattr(user, "language_code", None) or "uz" if user else "uz"
+            driver_lang = getattr(driver_user, "language_code", None) or "uz" if driver_user else "uz"
+            bonus_info = await deduct_commission_on_trip_complete(db, updated_order)
+
+            # Mijoz va haydovchiga xabar - use plain vars only (no ORM access after commit)
+            try:
+                from decimal import Decimal as _Dec
+                final_price_val = int(getattr(updated_order, "final_price", None) or 0)
+                dist_km = float(getattr(updated_order, "distance_km", None) or 0)
+                dist_val = f"{dist_km:.1f}" if dist_km else "0"
+
+                used_bonus    = int(bonus_info.get("used_bonus", 0))
+                earned_cashback = int(bonus_info.get("earned_cashback", 0))
+                payable_amount  = int(bonus_info.get("payable_amount", 0))
+                commission_val  = int(bonus_info.get("commission", 0))
+
+                def _fmt(n: int) -> str:
+                    return f"{n:,}".replace(",", " ")
+
+                # Mijoz xabari (o'zgarmagan format)
+                dist_line = "\n" + get_text(user_lang, "distance_label", dist=dist_val) if dist_km else ""
+                msg_user = (
+                    get_text(user_lang, "trip_completed_title")
+                    + "\n\n"
+                    + get_text(
+                        user_lang,
+                        "user_final_bill",
+                        payable=_fmt(payable_amount),
+                        used=_fmt(used_bonus),
+                        earned=_fmt(earned_cashback),
+                    )
+                    + dist_line
+                )
+
+                # Haydovchi xabari — minimalist, bonus/no-bonus ikkita variant
+                if used_bonus > 0:
+                    net_cash = final_price_val - used_bonus   # mijoz naqd to'lagan
+                    balance_change = used_bonus - commission_val
+                    msg_driver = (
+                        f"✅ <b>Safar yakunlandi!</b>\n"
+                        f"💵 Naqd: <b>{_fmt(net_cash)} so'm</b>\n"
+                        f"🎁 Bonus: <b>{_fmt(used_bonus)} so'm</b>\n"
+                        f"📉 Kom: <b>-{_fmt(commission_val)} so'm</b>\n"
+                        f"📈 Balans: <b>+{_fmt(balance_change)} so'm</b>"
+                    )
+                else:
+                    msg_driver = (
+                        f"✅ <b>Safar yakunlandi!</b>\n"
+                        f"💵 To'lov: <b>{_fmt(final_price_val)} so'm</b>\n"
+                        f"📉 Kom: <b>-{_fmt(commission_val)} so'm</b>"
+                    )
+
+                from app.bot.telegram_bot import bot, dp
+                sent_user = False
+                sent_driver = False
+                user_main_menu_sent = False
+
+                if user_telegram_id:
+                    try:
+                        from app.bot.tracking_message_cleanup import clear_user_tracking_message
+
+                        tracking_mid = getattr(updated_order, "user_tracking_message_id", None)
+                        await clear_user_tracking_message(
+                            bot, user_telegram_id, tracking_mid
+                        )
+
+                        await bot.send_message(user_telegram_id, msg_user, parse_mode="HTML")
+                        sent_user = True
+
+                        key = StorageKey(
+                            bot_id=bot.id,
+                            chat_id=user_telegram_id,
+                            user_id=user_telegram_id,
+                        )
+                        user_fsm = FSMContext(storage=dp.storage, key=key)
+                        await user_fsm.clear()
+
+                        await bot.send_message(
+                            chat_id=user_telegram_id,
+                            text=get_text(user_lang, "order_finished"),
+                            reply_markup=get_main_keyboard(user_lang),
+                        )
+                        user_main_menu_sent = True
+                    except Exception as ex:
+                        logger.warning(f"Mijozga xabar yuborishda xato (bloklangan yoki boshqa): {ex}")
+
+                if driver_telegram_id:
+                    try:
+                        await bot.send_message(driver_telegram_id, msg_driver, parse_mode="HTML")
+                        sent_driver = True
+                    except Exception as ex:
+                        logger.warning(f"Haydovchiga xabar yuborishda xato: {ex}")
+
+                if sent_user or sent_driver:
+                    logger.info(
+                        f"📱 Safar #{order_id} yakunlandi - mijoz: {sent_user}, haydovchi: {sent_driver}, "
+                        f"bosh menyu yuborildi: {user_main_menu_sent}"
+                    )
+            except Exception as ex:
+                logger.warning(f"Xabar yuborishda xato: {ex}")
+
+        return {"success": True, "status": str(mapped_status.value if hasattr(mapped_status, 'value') else mapped_status)}
+    except HTTPException:
+        raise
+    except Exception as e:
+        try:
+            await db.rollback()
+        except Exception:
+            pass
+        logger.error(f"❌ Status POST xatosi: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
+        raise HTTPException(status_code=500, detail=f"Baza xatosi: {str(e)}")
+
+
+@router.post("/order/{order_id}/arrived")
+async def driver_arrived(
+    order_id: int,
+    token: Optional[str] = Header(None, alias="X-WebApp-Token"),
+    qtoken: Optional[str] = Query(None, alias="token"),
+    db: AsyncSession = Depends(get_db)
+):
+    """Haydovchi mijoz oldiga keldi — mijozga xabar yuborish. Token talab qilinadi."""
+    try:
+        t = token or qtoken
+        if not t:
+            return JSONResponse({"ok": False, "detail": "WebApp token required"}, status_code=403)
+        data = verify_webapp_token(t, order_id)
+        if not data:
+            return JSONResponse({"ok": False, "detail": "Invalid or expired token"}, status_code=403)
+        _, driver_id = data
+
+        from sqlalchemy import select
+        from app.models.order import Order
+        from app.models.user import User
+        from app.bot.telegram_bot import send_message_to_user
+
+        result = await db.execute(select(Order).where(Order.id == order_id))
+        order = result.scalar_one_or_none()
+        if not order:
+            return JSONResponse({"ok": False, "detail": "Order topilmadi"})
+        if getattr(order, "driver_id", None) != driver_id:
+            return JSONResponse({"ok": False, "detail": "Access denied"}, status_code=403)
+
+        # Save arrived timestamp
+        await db.execute(
+            text("UPDATE orders SET arrived_at = :now WHERE id = :oid"),
+            {"now": datetime.utcnow(), "oid": order_id}
+        )
+        await db.commit()
+
+        user_result = await db.execute(select(User).where(User.id == order.user_id))
+        user = user_result.scalar_one_or_none()
+        if not user or not getattr(user, "telegram_id", None):
+            return JSONResponse({"ok": False, "detail": "User telegram_id yo'q"})
+
+        lang = getattr(user, "language_code", None) or "uz"
+        lang = lang.lower()
+
+        if lang == "ru":
+            msg = (
+                "🚕 Ваш водитель прибыл!\n\n"
+                "Пожалуйста, приготовьтесь выходить.\n"
+                "Водитель ждёт вас. 🙏"
+            )
+        elif lang == "uz_cyrl":
+            msg = (
+                "🚕 Ҳайдовчингиз етиб келди!\n\n"
+                "Илтимос, чиқишга тайёр туринг.\n"
+                "Ҳайдовчи сизни кутмоқда. 🙏"
+            )
+        else:
+            msg = (
+                "🚕 Haydovchingiz yetib keldi!\n\n"
+                "Iltimos, chiqishga tayyor bo'ling.\n"
+                "Haydovchi sizi kutmoqda. 🙏"
+            )
+
+        try:
+            await send_message_to_user(user.telegram_id, msg)
+        except Exception:
+            pass
+
+        return JSONResponse({"ok": True})
+    except Exception as e:
+        return JSONResponse({"ok": False, "detail": str(e)})
+
+
+class UpdateDriverLocationBody(BaseModel):
+    driver_id: int
+    latitude: float
+    longitude: float
+    heading: Optional[float] = None
+    order_id: Optional[int] = None
+
+
+@router.post("/update_driver_location")
+async def update_driver_location_api(
+    body: UpdateDriverLocationBody,
+    token: Optional[str] = Header(None, alias="X-WebApp-Token"),
+    qtoken: Optional[str] = Query(None, alias="token"),
+    db: AsyncSession = Depends(get_db)
+):
+    """Haydovchi joylashuvini Redis ga yozish va yaqinlashish (50m) xabarini yuborish.
+
+    Smart Driver Arrival:
+    - 50 m dan kam qolsa, mijozga yaqinlashish xabari (oldidagi logika) yuboriladi
+    - Driver Web-panelida 'Keldim' tugmasi frontend orqali faollashadi (distance < 50m)
+    """
+    if not _valid_coord(body.latitude, body.longitude):
+        raise HTTPException(status_code=400, detail="Invalid coordinates")
+
+    # Verify driver exists (auth when order_id is None)
+    driver = await DriverCRUD.get_by_id(db, body.driver_id)
+    if not driver:
+        raise HTTPException(status_code=404, detail="Driver not found")
+
+    t = token or qtoken
+    if t and body.order_id is not None:
+        data = verify_webapp_token(t, body.order_id)
+        if not data:
+            raise HTTPException(status_code=403, detail="Invalid or expired WebApp token")
+        _, tok_driver_id = data
+        if tok_driver_id != body.driver_id:
+            raise HTTPException(status_code=403, detail="Token driver_id mismatch")
+
+    redis = get_redis()
+    if redis is not None:
+        ok = set_driver_location(redis, body.driver_id, body.latitude, body.longitude, body.heading)
+        if not ok:
+            logger.warning("Redis driver location write failed (continuing with DB update)")
+
+    # DB-ga yozish (har 3 soniyada bir marta) - matching uchun PostGIS location + location_updated_at
+    try:
+        DB_WRITE_THROTTLE_SEC = 3
+        should_write = True
+        if redis is not None:
+            throttle_key = f"driver_loc_db_throttle:{body.driver_id}"
+            should_write = redis.set(throttle_key, "1", ex=DB_WRITE_THROTTLE_SEC, nx=True)
+        if should_write:
+            await db.execute(
+                text("""
+                    UPDATE drivers
+                    SET
+                        current_latitude = :lat,
+                        current_longitude = :lon,
+                        location = ST_SetSRID(ST_MakePoint(:lon, :lat), 4326)::geography,
+                        location_updated_at = NOW()
+                    WHERE id = :driver_id
+                """),
+                {
+                    "driver_id": body.driver_id,
+                    "lat": body.latitude,
+                    "lon": body.longitude,
+                },
+            )
+        # Taksometr: in_progress buyurtmada har nuqta (throttle dan mustaqil) masofaga qo'shiladi
+        await accumulate_order_distance_for_driver(db, body.driver_id, body.latitude, body.longitude)
+        await db.commit()
+    except Exception as ex:
+        # Redis ishlasa ham, DB throttle yangilashda xato bo‘lsa matching vaqtincha ishlamasligi mumkin.
+        # Shuning uchun warning log qilamiz, lekin endpointni fail qilmexmaymiz.
+        logger.warning(f"DB driver location update xato: {ex}")
+
+    order = await OrderCRUD.get_active_order_for_driver(db, body.driver_id)
+    if not order or not order.user_id:
+        return {"ok": True}
+    if getattr(order, "is_near_notified", False):
+        return {"ok": True}
+    pickup_lat = getattr(order, "pickup_latitude", None)
+    pickup_lon = getattr(order, "pickup_longitude", None)
+    if pickup_lat is None or pickup_lon is None:
+        return {"ok": True}
+
+    from app.utils.distance import haversine_distance
+    dist_km = haversine_distance(body.latitude, body.longitude, float(pickup_lat), float(pickup_lon))
+    if dist_km >= 0.05:
+        return {"ok": True}
+
+    try:
+        from app.bot.telegram_bot import bot
+        user = await UserCRUD.get_by_id(db, order.user_id)
+        if user and user.telegram_id:
+            from app.bot.messages import get_text as _get_text
+            user_lang = getattr(user, "language_code", None) or "uz"
+            msg = _get_text(user_lang, "driver_near")
+            await bot.send_message(user.telegram_id, msg, parse_mode="HTML")
+            await OrderCRUD.mark_near_notified(db, order.id)
+            logger.info(f"📱 Proximity xabar yuborildi: order #{order.id}, user {user.telegram_id}")
+    except Exception as ex:
+        logger.warning(f"Proximity xabar xato: {ex}")
+
+    return {"ok": True}
+
+
+@router.get("/order/{order_id}/driver-location")
+async def get_driver_location(order_id: int, db: AsyncSession = Depends(get_db)):
+    """Buyurtma uchun haydovchi joylashuvini qaytarish (Redis birinchi, keyin PostgreSQL)."""
+    try:
+        order = await OrderCRUD.get_by_id(db, order_id)
+        if not order or not getattr(order, "driver_id", None):
+            return {"driver": None, "latitude": None, "longitude": None}
+        driver = await DriverCRUD.get_by_id(db, order.driver_id)
+        if not driver:
+            return {"driver": None, "latitude": None, "longitude": None}
+        user = await UserCRUD.get_by_id(db, driver.user_id) if driver.user_id else None
+
+        # Redis'dan birinchi o'qish
+        redis = get_redis()
+        cached = get_driver_location_redis(redis, order.driver_id) if redis else None
+        if cached:
+            lat, lon = cached
+        else:
+            lat = getattr(driver, "current_latitude", None)
+            lon = getattr(driver, "current_longitude", None)
+        car = getattr(driver, "car_model", "") or ""
+        if getattr(driver, "car_number", None):
+            car = (car + " " + str(driver.car_number)).strip()
+        return {
+            "driver": {"name": getattr(user, "first_name", None) or "Haydovchi", "car": car or "—"},
+            "latitude": float(lat) if lat is not None else None,
+            "longitude": float(lon) if lon is not None else None,
+        }
+    except Exception as e:
+        logger.error(f"Driver location xato: {e}")
+        return {"driver": None, "latitude": None, "longitude": None}
+
+
+@router.post("/debug-log")
+async def webapp_debug_log(payload: dict[str, Any]):
+    """Client-side debug loglarini qabul qilish (taximeter WebApp)."""
+    try:
+        log_path = Path(__file__).resolve().parents[3] / "debug-8ab418.log"
+        line = json.dumps({**payload, "timestamp": payload.get("timestamp")}, ensure_ascii=False) + "\n"
+        with open(log_path, "a", encoding="utf-8") as f:
+            f.write(line)
+    except Exception:
+        pass
+    return {"ok": True}
