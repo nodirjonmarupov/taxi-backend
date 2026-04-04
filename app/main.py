@@ -1767,7 +1767,7 @@ USER_TRACKING_HTML = """
         var driverLocation = null;
         var AVG_KMH = 40;
         var OFF_ROUTE_M = 40;
-        var SNAP_MAX_M = 40;
+        var SNAP_MAX_M = 100;
         var NAV_3D_DISTANCE_KM = 0.5;
         var POLL_MS = 5000;
         var LERP_MS = 5000;
@@ -1791,8 +1791,9 @@ USER_TRACKING_HTML = """
         var smoothMapPitch = 0;
         var lastRouteTrimTs = 0;
         var ROUTE_TRIM_MIN_MS = 120;
-        var CAMERA_PADDING_BOTTOM = 200;
         var NAV_PITCH_DEG = 55;
+        var _snapConsoleKey = '';
+        var _snapConsoleTs = 0;
 
         function isValid(lat, lon) {
             return lat != null && lon != null && !isNaN(lat) && !isNaN(lon) && lat >= -90 && lat <= 90 && lon >= -180 && lon <= 180;
@@ -1845,15 +1846,38 @@ USER_TRACKING_HTML = """
 
         /** Marshrutdan SNAP_MAX_M ichida bo'lsa — nearestPointOnLine; aks holda GPS (erkin) */
         function resolveDriverDisplayPoint(lat, lon) {
+            // #region agent log
+            function _snapDbg(msg, data) {
+                fetch('http://127.0.0.1:7602/ingest/b6487788-bee6-445f-81f9-95a1b43ce854', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Debug-Session-Id': '7969f2' }, body: JSON.stringify({ sessionId: '7969f2', location: 'USER_TRACKING:resolveDriverDisplayPoint', message: msg, data: data || {}, timestamp: Date.now(), hypothesisId: 'H1-snap' }) }).catch(function () {});
+            }
+            // #endregion
+            function snapConsole(label) {
+                var now = performance.now();
+                if (label !== _snapConsoleKey || (now - _snapConsoleTs) > 1200) {
+                    _snapConsoleKey = label;
+                    _snapConsoleTs = now;
+                    console.log(label);
+                }
+            }
             if (!routeLineFeature || !routeCoordsLngLat || routeCoordsLngLat.length < 2) {
+                snapConsole('SNAP: Off Route (GPS)');
+                _snapDbg('no_route', {});
                 return { lon: lon, lat: lat, segIndex: null, snapped: false };
             }
             var d = distanceFromRouteMeters(lat, lon);
             if (d > SNAP_MAX_M) {
+                snapConsole('SNAP: Off Route (GPS)');
+                _snapDbg('beyond_snap_max', { dM: Math.round(d), maxM: SNAP_MAX_M });
                 return { lon: lon, lat: lat, segIndex: null, snapped: false };
             }
             var s = snapToRouteLineForced(lat, lon);
-            if (!s) return { lon: lon, lat: lat, segIndex: null, snapped: false };
+            if (!s) {
+                snapConsole('SNAP: Off Route (GPS)');
+                _snapDbg('nearest_failed', { dM: Math.round(d) });
+                return { lon: lon, lat: lat, segIndex: null, snapped: false };
+            }
+            snapConsole('SNAP: On Route');
+            _snapDbg('snapped', { dM: Math.round(d) });
             return { lon: s.lon, lat: s.lat, segIndex: s.segIndex, snapped: true };
         }
 
@@ -1983,7 +2007,7 @@ USER_TRACKING_HTML = """
         function easeFollowToDriver() {
             if (!map || displayLat == null || displayLon == null) return;
             cameraProgrammatic = true;
-            var pad = { top: 64, bottom: CAMERA_PADDING_BOTTOM, left: 28, right: 28 };
+            var pad = { top: 0, bottom: 0, left: 0, right: 0 };
             map.easeTo({
                 center: [displayLon, displayLat],
                 zoom: 17,
@@ -2040,13 +2064,9 @@ USER_TRACKING_HTML = """
                 map.setBearing(smoothMapBearing);
                 try {
                     if (typeof map.setPadding === 'function') {
-                        map.setPadding({ top: 56, bottom: CAMERA_PADDING_BOTTOM, left: 24, right: 24 });
-                        map.setCenter([displayLon, displayLat]);
-                    } else {
-                        var pc = map.project([displayLon, displayLat]);
-                        pc.y -= CAMERA_PADDING_BOTTOM * 0.55;
-                        map.setCenter(map.unproject(pc));
+                        map.setPadding({ top: 0, bottom: 0, left: 0, right: 0 });
                     }
+                    map.setCenter([displayLon, displayLat]);
                 } catch (e2) {
                     map.setCenter([displayLon, displayLat]);
                 }
