@@ -1697,10 +1697,13 @@ USER_TRACKING_HTML = """
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate" />
+    <meta http-equiv="Pragma" content="no-cache" />
+    <meta http-equiv="Expires" content="0" />
     <title>Taksi yetib kelmoqda</title>
-    <script src="https://telegram.org/js/telegram-web-app.js?v=999"></script>
-    <script src="https://unpkg.com/@turf/turf@6/turf.min.js"></script>
-    <link href="https://cdn.jsdelivr.net/npm/maplibre-gl@3.6.2/dist/maplibre-gl.css" rel="stylesheet"/>
+    <script src="https://telegram.org/js/telegram-web-app.js?v=4.0.0"></script>
+    <script src="https://unpkg.com/@turf/turf@6/turf.min.js?v=4.0.0"></script>
+    <link href="https://cdn.jsdelivr.net/npm/maplibre-gl@3.6.2/dist/maplibre-gl.css?v=4.0.0" rel="stylesheet"/>
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
         body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #0a0a0a; color: #fff; }
@@ -1751,7 +1754,7 @@ USER_TRACKING_HTML = """
         <div class="eta" id="eta">— daqiqa</div>
     </div>
     <button class="btn-recenter" id="btnRecenter">Mening joyim</button>
-    <script src="https://cdn.jsdelivr.net/npm/maplibre-gl@3.6.2/dist/maplibre-gl.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/maplibre-gl@3.6.2/dist/maplibre-gl.js?v=4.0.0"></script>
     <script>
         var tg = (window.Telegram && window.Telegram.WebApp) ? window.Telegram.WebApp : { expand: function(){} };
         try { tg.expand(); } catch (_) {}
@@ -1763,7 +1766,8 @@ USER_TRACKING_HTML = """
         var liveUserLocation = null;
         var driverLocation = null;
         var AVG_KMH = 40;
-        var OFF_ROUTE_M = 30;
+        var OFF_ROUTE_M = 40;
+        var SNAP_MAX_M = 40;
         var NAV_3D_DISTANCE_KM = 0.5;
         var POLL_MS = 5000;
         var LERP_MS = 5000;
@@ -1787,7 +1791,7 @@ USER_TRACKING_HTML = """
         var smoothMapPitch = 0;
         var lastRouteTrimTs = 0;
         var ROUTE_TRIM_MIN_MS = 120;
-        var DRIVER_SCREEN_OFFSET_PX = 118;
+        var CAMERA_PADDING_BOTTOM = 200;
         var NAV_PITCH_DEG = 55;
 
         function isValid(lat, lon) {
@@ -1837,6 +1841,20 @@ USER_TRACKING_HTML = """
                 lat: snapped.geometry.coordinates[1],
                 segIndex: segIdx
             };
+        }
+
+        /** Marshrutdan SNAP_MAX_M ichida bo'lsa — nearestPointOnLine; aks holda GPS (erkin) */
+        function resolveDriverDisplayPoint(lat, lon) {
+            if (!routeLineFeature || !routeCoordsLngLat || routeCoordsLngLat.length < 2) {
+                return { lon: lon, lat: lat, segIndex: null, snapped: false };
+            }
+            var d = distanceFromRouteMeters(lat, lon);
+            if (d > SNAP_MAX_M) {
+                return { lon: lon, lat: lat, segIndex: null, snapped: false };
+            }
+            var s = snapToRouteLineForced(lat, lon);
+            if (!s) return { lon: lon, lat: lat, segIndex: null, snapped: false };
+            return { lon: s.lon, lat: s.lat, segIndex: s.segIndex, snapped: true };
         }
 
         /** Yo'l segmenti bo'ylab mijoz (coords[0]) tomonga harakat yo'nalishi — Turf bearing */
@@ -1946,6 +1964,11 @@ USER_TRACKING_HTML = """
             if (cameraProgrammatic) return;
             followDriver = false;
             lastUserInteractMs = performance.now();
+            try {
+                if (map && typeof map.setPadding === 'function') {
+                    map.setPadding({ top: 0, bottom: 0, left: 0, right: 0 });
+                }
+            } catch (_) {}
         }
 
         function wireMapInteractionHandlers() {
@@ -1954,32 +1977,24 @@ USER_TRACKING_HTML = """
             map.on('rotatestart', function(e) {
                 if (e && e.originalEvent) onUserMapInteraction();
             });
-            map.on('zoomstart', function(e) {
-                if (e && e.originalEvent) onUserMapInteraction();
-            });
+            map.on('zoomstart', onUserMapInteraction);
         }
 
         function easeFollowToDriver() {
             if (!map || displayLat == null || displayLon == null) return;
             cameraProgrammatic = true;
-            var ref = liveUserLocation || userLocation;
-            var distKm = ref ? turfDistanceKm(displayLat, displayLon, ref.lat, ref.lon) : 999;
-            var p = distKm < NAV_3D_DISTANCE_KM ? NAV_PITCH_DEG : 0;
+            var pad = { top: 64, bottom: CAMERA_PADDING_BOTTOM, left: 28, right: 28 };
             map.easeTo({
                 center: [displayLon, displayLat],
                 zoom: 17,
-                pitch: p,
+                pitch: NAV_PITCH_DEG,
                 bearing: smoothBearing,
-                padding: {
-                    top: 64,
-                    bottom: Math.round(window.innerHeight * 0.34),
-                    left: 28,
-                    right: 28
-                },
+                padding: pad,
                 duration: 1000
             });
             setTimeout(function() {
                 try {
+                    if (typeof map.setPadding === 'function') map.setPadding(pad);
                     smoothMapPitch = map.getPitch();
                     smoothMapBearing = map.getBearing();
                 } catch (e3) {}
@@ -1994,12 +2009,17 @@ USER_TRACKING_HTML = """
                 var t = Math.min(1, Math.max(0, easeOutCubic(rawT)));
                 displayLat = lerp(lerpFromLat, lerpToLat, t);
                 displayLon = lerp(lerpFromLon, lerpToLon, t);
-                var corr = snapToRouteLineForced(displayLat, displayLon);
-                if (corr) {
-                    displayLat = corr.lat;
-                    displayLon = corr.lon;
-                    routeSegmentBearing = bearingFromRouteSegment(corr.segIndex);
+                var rdp = resolveDriverDisplayPoint(displayLat, displayLon);
+                displayLat = rdp.lat;
+                displayLon = rdp.lon;
+                if (rdp.snapped && rdp.segIndex != null) {
+                    routeSegmentBearing = bearingFromRouteSegment(rdp.segIndex);
                     targetBearing = routeSegmentBearing;
+                } else if (prevDispLat != null && prevDispLon != null) {
+                    var movedKm = turfDistanceKm(prevDispLat, prevDispLon, displayLat, displayLon);
+                    if (movedKm > 0.00002) {
+                        targetBearing = turfBearingDeg(prevDispLat, prevDispLon, displayLat, displayLon);
+                    }
                 }
                 smoothBearing = lerpAngleDeg(smoothBearing, targetBearing, 0.14);
                 if (driverMarkerInnerEl) {
@@ -2019,10 +2039,14 @@ USER_TRACKING_HTML = """
                 map.setPitch(smoothMapPitch);
                 map.setBearing(smoothMapBearing);
                 try {
-                    var pc = map.project([displayLon, displayLat]);
-                    pc.y -= DRIVER_SCREEN_OFFSET_PX;
-                    var nc = map.unproject(pc);
-                    map.setCenter(nc);
+                    if (typeof map.setPadding === 'function') {
+                        map.setPadding({ top: 56, bottom: CAMERA_PADDING_BOTTOM, left: 24, right: 24 });
+                        map.setCenter([displayLon, displayLat]);
+                    } else {
+                        var pc = map.project([displayLon, displayLat]);
+                        pc.y -= CAMERA_PADDING_BOTTOM * 0.55;
+                        map.setCenter(map.unproject(pc));
+                    }
                 } catch (e2) {
                     map.setCenter([displayLon, displayLat]);
                 }
@@ -2179,10 +2203,8 @@ USER_TRACKING_HTML = """
                     driverLocation = { lat: lat, lon: lon };
                     var forceRoute = !routeLineFeature || distanceFromRouteMeters(lat, lon) > OFF_ROUTE_M;
                     if (userLocation) drawRouteBetween(userLocation, driverLocation, forceRoute);
-                    var snapMeta = snapToRouteLineForced(lat, lon);
-                    if (snapMeta) {
-                        beginLerpTo(snapMeta.lon, snapMeta.lat);
-                    }
+                    var rdp = resolveDriverDisplayPoint(lat, lon);
+                    beginLerpTo(rdp.lon, rdp.lat);
                     var ref = liveUserLocation || userLocation;
                     if (ref) {
                         var d = turfDistanceKm(lat, lon, ref.lat, ref.lon);
