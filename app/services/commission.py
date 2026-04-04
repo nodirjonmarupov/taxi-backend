@@ -6,7 +6,6 @@ Yakuniy DB/UI qiymatlari butun songa (100 so'mga) yaxlitlanadi.
 from decimal import Decimal, ROUND_DOWN
 from typing import Any
 
-from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import func, select
 
 from app.core.config import settings as config
@@ -80,7 +79,6 @@ async def release_frozen_bonus(order_id: int) -> None:
 
 
 async def deduct_commission_on_trip_complete(
-    db: AsyncSession,
     order,
 ) -> dict[str, Any]:
     """
@@ -92,7 +90,10 @@ async def deduct_commission_on_trip_complete(
 
     Barcha hisob-kitoblar Decimal.
     Idempotent: commission_deducted_at bo'lsa qayta ishlamaydi.
-    O'z sessiyasida ishlaydi (MissingGreenlet dan himoya).
+
+    MUHIM: Bu funksiya request db sessiyasini QABUL QILMAYDI va ISHLATMAYDI.
+    Har doim o'zining alohida AsyncSessionLocal() sessiyasida ishlaydi —
+    bu MissingGreenlet va "closed transaction" xatolarini oldini oladi.
     """
     if not order or not getattr(order, "driver_id", None):
         return {"success": False}
@@ -101,6 +102,11 @@ async def deduct_commission_on_trip_complete(
     order_id = int(getattr(order, "id", 0))
     if not order_id:
         return {"success": False}
+
+    logger.info(
+        f"🔄 deduct_commission_on_trip_complete: order_id={order_id}, "
+        f"driver_id={driver_id} — o'z sessiyasida ishlaydi (request db ishlatilmaydi)"
+    )
 
     async with AsyncSessionLocal() as session:
         try:

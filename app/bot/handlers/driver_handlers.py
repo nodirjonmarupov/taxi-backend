@@ -1260,9 +1260,9 @@ async def finish_order(callback: CallbackQuery):
 
             await db.commit()
 
-            # 2. Komissiyani haydovchi balansidan ayirish
+            # 2. Komissiyani haydovchi balansidan ayirish (o'z sessiyasida)
             from app.services.commission import deduct_commission_on_trip_complete
-            bonus_info = await deduct_commission_on_trip_complete(db, order)
+            bonus_info = await deduct_commission_on_trip_complete(order)
             used_bonus     = int(bonus_info.get("used_bonus", 0))
             earned_cashback = int(bonus_info.get("earned_cashback", 0))
             payable_amount  = int(bonus_info.get("payable_amount", 0))

@@ -270,17 +270,30 @@ async def update_order_status(
             from aiogram.fsm.storage.base import StorageKey
             from aiogram.fsm.context import FSMContext
             from app.bot.keyboards.main_menu import get_main_keyboard
+            from app.core.database import AsyncSessionLocal
 
-            # Fetch user and driver BEFORE deduct_commission (avoids MissingGreenlet after commit)
-            user = await UserCRUD.get_by_id(db, order.user_id)
-            driver = await DriverCRUD.get_by_id(db, order.driver_id)
-            driver_user = await UserCRUD.get_by_id(db, driver.user_id) if driver and driver.user_id else None
+            # Telegram ID va til ma'lumotlarini ALOHIDA sessiyada olamiz.
+            # Sabab: request db update_status ichida commit qilingan; bir xil
+            # sessiya bilan yana so'rov yuborilsa asyncpg "transaction is closed"
+            # xatoligini berishi mumkin. Yangi sessiya bu muammoni butunlay yo'q qiladi.
+            user_telegram_id = None
+            driver_telegram_id = None
+            user_lang = "uz"
+            driver_lang = "uz"
+            async with AsyncSessionLocal() as _fetch_session:
+                _user = await UserCRUD.get_by_id(_fetch_session, order.user_id)
+                _driver = await DriverCRUD.get_by_id(_fetch_session, order.driver_id)
+                _driver_user = (
+                    await UserCRUD.get_by_id(_fetch_session, _driver.user_id)
+                    if _driver and _driver.user_id else None
+                )
+                user_telegram_id = getattr(_user, "telegram_id", None) if _user else None
+                driver_telegram_id = getattr(_driver_user, "telegram_id", None) if _driver_user else None
+                user_lang = getattr(_user, "language_code", None) or "uz" if _user else "uz"
+                driver_lang = getattr(_driver_user, "language_code", None) or "uz" if _driver_user else "uz"
 
-            user_telegram_id = getattr(user, "telegram_id", None) if user else None
-            driver_telegram_id = getattr(driver_user, "telegram_id", None) if driver_user else None
-            user_lang = getattr(user, "language_code", None) or "uz" if user else "uz"
-            driver_lang = getattr(driver_user, "language_code", None) or "uz" if driver_user else "uz"
-            bonus_info = await deduct_commission_on_trip_complete(db, updated_order)
+            # Commission o'z sessiyasida ishlaydi — request db uzatilmaydi
+            bonus_info = await deduct_commission_on_trip_complete(updated_order)
 
             # Mijoz va haydovchiga xabar - use plain vars only (no ORM access after commit)
             try:
