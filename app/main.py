@@ -1701,9 +1701,6 @@ USER_TRACKING_HTML = """
     <meta http-equiv="Pragma" content="no-cache" />
     <meta http-equiv="Expires" content="0" />
     <title>Taksi yetib kelmoqda</title>
-    <script src="https://telegram.org/js/telegram-web-app.js?v=8.0.0"></script>
-    <script src="https://unpkg.com/@turf/turf@6/turf.min.js?v=8.0.0"></script>
-    <link href="https://cdn.jsdelivr.net/npm/maplibre-gl@3.6.2/dist/maplibre-gl.css?v=8.0.0" rel="stylesheet"/>
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
         body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #0a0a0a; color: #fff; }
@@ -1754,10 +1751,39 @@ USER_TRACKING_HTML = """
         <div class="eta" id="eta">— daqiqa</div>
     </div>
     <button class="btn-recenter" id="btnRecenter">Mening joyim</button>
-    <script src="https://cdn.jsdelivr.net/npm/maplibre-gl@3.6.2/dist/maplibre-gl.js?v=8.0.0"></script>
     <script>
-        var tg = (window.Telegram && window.Telegram.WebApp) ? window.Telegram.WebApp : { expand: function(){} };
-        try { tg.expand(); } catch (_) {}
+        /* ── Dynamic resource loader (Date.now() = cache busting) ── */
+        (function() {
+            var _V = Date.now();
+            // MapLibre CSS
+            var _css = document.createElement('link');
+            _css.rel = 'stylesheet';
+            _css.href = 'https://cdn.jsdelivr.net/npm/maplibre-gl@3.6.2/dist/maplibre-gl.css?v=' + _V;
+            document.head.appendChild(_css);
+            // Telegram WebApp (non-blocking)
+            var _tgScript = document.createElement('script');
+            _tgScript.src = 'https://telegram.org/js/telegram-web-app.js?v=' + _V;
+            document.head.appendChild(_tgScript);
+            // Turf → MapLibre → init (sequential, blocking)
+            function _loadScript(src, cb) {
+                var s = document.createElement('script');
+                s.src = src + '?v=' + _V;
+                s.onload = cb || function() {};
+                s.onerror = function() { console.error('[LOAD ERROR]', src); };
+                document.head.appendChild(s);
+            }
+            _loadScript('https://unpkg.com/@turf/turf@6/turf.min.js', function() {
+                _loadScript('https://cdn.jsdelivr.net/npm/maplibre-gl@3.6.2/dist/maplibre-gl.js', function() {
+                    init();
+                });
+            });
+        })();
+        /* ── tg lazily resolved after Telegram script loads ── */
+        function getTg() {
+            return (window.Telegram && window.Telegram.WebApp)
+                ? window.Telegram.WebApp
+                : { expand: function() {}, ready: function() {} };
+        }
         var map, driverMarker, userMarker, pickupMarker, driverMarkerInnerEl;
         var urlParams = new URLSearchParams(window.location.search);
         var orderId = urlParams.get('order_id');
@@ -1788,8 +1814,6 @@ USER_TRACKING_HTML = """
         var cameraProgrammatic = false;
         var smoothMapBearing = 0;
         var smoothMapPitch = 0;
-        var lastRouteTrimTs = 0;
-        var ROUTE_TRIM_MIN_MS = 120;
         var NAV_PITCH_DEG = 55;
         var _snapLogTs = 0;
         var _snapLogKey = '';
@@ -1848,8 +1872,10 @@ USER_TRACKING_HTML = """
          *  - Marshrut mavjud bo'lsa — DOIM nearestPointOnLine ga yopish (mesofadan qat'i nazar)
          *  - Faqat marshrut yo'q bo'lsa GPS dan foydalan
          */
+        var _logCheckTs = 0;
         function resolveDriverDisplayPoint(lat, lon) {
             var now = performance.now();
+            if (now - _logCheckTs > 2000) { _logCheckTs = now; console.log("LOG_CHECK: V8 is Running"); }
             // #region agent log
             function _snapDbg(msg, dM) {
                 fetch('http://127.0.0.1:7602/ingest/b6487788-bee6-445f-81f9-95a1b43ce854', {
@@ -2095,12 +2121,10 @@ USER_TRACKING_HTML = """
                     map.setCenter([displayLon, displayLat]);
                 }
             }
+            // Force refresh: throttle yo'q — har kadrda progressive trim
             if (routeLineFeature && routeCoordsLngLat.length >= 2 && displayLat != null && displayLon != null) {
-                if (now - lastRouteTrimTs >= ROUTE_TRIM_MIN_MS) {
-                    lastRouteTrimTs = now;
-                    var trimmed = trimRouteToRemaining(displayLon, displayLat);
-                    setRouteOnMap(trimmed);
-                }
+                var trimmed = trimRouteToRemaining(displayLon, displayLat);
+                setRouteOnMap(trimmed);
             }
             rafId = requestAnimationFrame(tickNavFrame);
         }
@@ -2258,7 +2282,7 @@ USER_TRACKING_HTML = """
                 }
             } catch (e) {}
         }
-        init();
+        /* init() is called by the dynamic script loader above */
     </script>
 </body>
 </html>
