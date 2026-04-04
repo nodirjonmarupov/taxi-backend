@@ -1699,6 +1699,7 @@ USER_TRACKING_HTML = """
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Taksi yetib kelmoqda</title>
     <script src="https://telegram.org/js/telegram-web-app.js?v=999"></script>
+    <script src="https://unpkg.com/@turf/turf@6/turf.min.js"></script>
     <link href="https://cdn.jsdelivr.net/npm/maplibre-gl@3.6.2/dist/maplibre-gl.css" rel="stylesheet"/>
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
@@ -1725,6 +1726,21 @@ USER_TRACKING_HTML = """
         }
         @keyframes pulse { 0%,100% { transform: scale(1); opacity: 1; } 50% { transform: scale(1.15); opacity: 0.85; } }
         .btn-recenter { position: fixed; bottom: 20px; right: 20px; z-index: 1000; padding: 12px 18px; border-radius: 12px; border: none; background: rgba(39,110,241,0.95); color: white; font-weight: 600; cursor: pointer; box-shadow: 0 2px 12px rgba(0,0,0,0.3); }
+        .driver-marker-inner {
+            width: 48px;
+            height: 48px;
+            background: #276EF1;
+            border-radius: 50%;
+            border: 3px solid white;
+            box-shadow: 0 4px 16px rgba(0,0,0,0.4);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 26px;
+            line-height: 1;
+            transform-origin: center center;
+            will-change: transform;
+        }
     </style>
 </head>
 <body>
@@ -1739,7 +1755,7 @@ USER_TRACKING_HTML = """
     <script>
         var tg = (window.Telegram && window.Telegram.WebApp) ? window.Telegram.WebApp : { expand: function(){} };
         try { tg.expand(); } catch (_) {}
-        var map, driverMarker, userMarker, pickupMarker;
+        var map, driverMarker, userMarker, pickupMarker, driverMarkerInnerEl;
         var urlParams = new URLSearchParams(window.location.search);
         var orderId = urlParams.get('order_id');
         var API_BASE = window.location.origin;
@@ -1747,11 +1763,199 @@ USER_TRACKING_HTML = """
         var liveUserLocation = null;
         var driverLocation = null;
         var AVG_KMH = 40;
-        function isValid(lat, lon) { return lat != null && lon != null && !isNaN(lat) && !isNaN(lon) && lat >= -90 && lat <= 90 && lon >= -180 && lon <= 180; }
-        function fitMapBounds() {
-            /* Disabled — map stays on user location */
-            return;
+        var OFF_ROUTE_M = 30;
+        var NAV_3D_DISTANCE_KM = 0.5;
+        var POLL_MS = 5000;
+        var LERP_MS = 5000;
+        var routeLineFeature = null;
+        var routeCoordsLngLat = [];
+        var routeFetchInFlight = false;
+        var followDriver = true;
+        var displayLat = null, displayLon = null;
+        var lerpFromLat, lerpFromLon, lerpToLat, lerpToLon;
+        var lerpStartTs = 0;
+        var smoothBearing = 0;
+        var targetBearing = 0;
+        var prevDispLat = null, prevDispLon = null;
+        var rafId = null;
+        var userRecenterMode = false;
+        var lastRouteTrimTs = 0;
+        var ROUTE_TRIM_MIN_MS = 120;
+
+        function isValid(lat, lon) {
+            return lat != null && lon != null && !isNaN(lat) && !isNaN(lon) && lat >= -90 && lat <= 90 && lon >= -180 && lon <= 180;
         }
+        function fitMapBounds() { return; }
+
+        function turfPt(lon, lat) { return turf.point([lon, lat]); }
+        function turfDistanceKm(aLat, aLon, bLat, bLon) {
+            return turf.distance(turfPt(aLon, aLat), turfPt(bLon, bLat), { units: 'kilometers' });
+        }
+        function turfBearingDeg(fromLat, fromLon, toLat, toLon) {
+            return turf.bearing(turfPt(fromLon, fromLat), turfPt(toLon, toLat));
+        }
+        function lerp(a, b, t) { return a + (b - a) * t; }
+        function lerpAngleDeg(a, b, t) {
+            var d = ((((b - a) % 360) + 540) % 360) - 180;
+            return a + d * t;
+        }
+        function easeOutCubic(t) { return 1 - Math.pow(1 - t, 3); }
+
+        function buildLineStringFeature(coordsLngLat) {
+            return turf.lineString(coordsLngLat);
+        }
+        function buildTrackRouteGeoJSON(coordsLngLat) {
+            return {
+                type: 'FeatureCollection',
+                features: [{
+                    type: 'Feature',
+                    geometry: { type: 'LineString', coordinates: coordsLngLat },
+                    properties: {}
+                }]
+            };
+        }
+
+        function snapToRouteLine(lat, lon) {
+            if (!routeLineFeature || !routeCoordsLngLat || routeCoordsLngLat.length < 2) return [lon, lat];
+            var pt = turfPt(lon, lat);
+            var snapped = turf.nearestPointOnLine(routeLineFeature, pt, { units: 'kilometers' });
+            if (snapped && snapped.geometry && snapped.geometry.coordinates) {
+                return [snapped.geometry.coordinates[0], snapped.geometry.coordinates[1]];
+            }
+            return [lon, lat];
+        }
+
+        function distanceFromRouteMeters(lat, lon) {
+            if (!routeLineFeature || !routeCoordsLngLat || routeCoordsLngLat.length < 2) return 0;
+            try {
+                return turf.pointToLineDistance(turfPt(lon, lat), routeLineFeature, { units: 'meters' });
+            } catch (e) { return 9999; }
+        }
+
+        function trimRouteToRemaining(displayLon, displayLat) {
+            if (!routeLineFeature || !routeCoordsLngLat || routeCoordsLngLat.length < 2) return routeCoordsLngLat.slice();
+            try {
+                var userPt = turf.point(routeCoordsLngLat[0]);
+                var drvPt = turf.point([displayLon, displayLat]);
+                var snapped = turf.nearestPointOnLine(routeLineFeature, drvPt, { units: 'kilometers' });
+                if (!snapped || !snapped.geometry) return routeCoordsLngLat.slice();
+                var slice = turf.lineSlice(userPt, snapped, routeLineFeature);
+                if (slice && slice.geometry && slice.geometry.coordinates && slice.geometry.coordinates.length >= 2) {
+                    return slice.geometry.coordinates;
+                }
+            } catch (e) { /* fallback */ }
+            return routeCoordsLngLat.slice();
+        }
+
+        function setRouteOnMap(coordsLngLat) {
+            if (!map || !coordsLngLat || coordsLngLat.length < 2) return;
+            var geo = buildTrackRouteGeoJSON(coordsLngLat);
+            if (map.getSource('track-route')) {
+                map.getSource('track-route').setData(geo);
+            } else {
+                map.addSource('track-route', { type: 'geojson', data: geo });
+                map.addLayer({
+                    id: 'track-route-main',
+                    type: 'line',
+                    source: 'track-route',
+                    layout: { 'line-join': 'round', 'line-cap': 'round' },
+                    paint: { 'line-color': '#FFD600', 'line-width': 6 }
+                });
+            }
+        }
+
+        function drawRouteBetween(fromPos, toPos, forceRefresh) {
+            if (!map || !fromPos || !toPos) return;
+            if (routeFetchInFlight) return;
+            var needFetch = forceRefresh || !routeLineFeature || routeCoordsLngLat.length < 2;
+            if (!needFetch) {
+                var offM = distanceFromRouteMeters(toPos.lat, toPos.lon);
+                if (offM > OFF_ROUTE_M) needFetch = true;
+            }
+            if (!needFetch) {
+                var trimmed = trimRouteToRemaining(displayLon != null ? displayLon : toPos.lon, displayLat != null ? displayLat : toPos.lat);
+                setRouteOnMap(trimmed);
+                return;
+            }
+            routeFetchInFlight = true;
+            var url = 'https://router.project-osrm.org/route/v1/driving/'
+                + fromPos.lon + ',' + fromPos.lat + ';'
+                + toPos.lon + ',' + toPos.lat
+                + '?overview=full&geometries=geojson';
+            fetch(url)
+                .then(function(r) { return r.json(); })
+                .then(function(data) {
+                    routeFetchInFlight = false;
+                    if (!data || !data.routes || !data.routes.length) return;
+                    var rr = data.routes[0];
+                    if (!rr.geometry || !rr.geometry.coordinates) return;
+                    routeCoordsLngLat = rr.geometry.coordinates.slice();
+                    routeLineFeature = buildLineStringFeature(routeCoordsLngLat);
+                    var trimmed = trimRouteToRemaining(displayLon != null ? displayLon : toPos.lon, displayLat != null ? displayLat : toPos.lat);
+                    setRouteOnMap(trimmed);
+                })
+                .catch(function() { routeFetchInFlight = false; });
+        }
+
+        function beginLerpTo(snappedLon, snappedLat) {
+            if (displayLat == null || displayLon == null) {
+                displayLat = snappedLat;
+                displayLon = snappedLon;
+                lerpFromLat = snappedLat; lerpFromLon = snappedLon;
+                lerpToLat = snappedLat; lerpToLon = snappedLon;
+                lerpStartTs = performance.now();
+                driverMarker.setLngLat([displayLon, displayLat]);
+                return;
+            }
+            lerpFromLat = displayLat;
+            lerpFromLon = displayLon;
+            lerpToLat = snappedLat;
+            lerpToLon = snappedLon;
+            lerpStartTs = performance.now();
+        }
+
+        function tickNavFrame(now) {
+            if (!map || !driverMarker) { rafId = requestAnimationFrame(tickNavFrame); return; }
+            if (displayLat != null && displayLon != null && lerpStartTs > 0) {
+                var rawT = (now - lerpStartTs) / LERP_MS;
+                var t = Math.min(1, Math.max(0, easeOutCubic(rawT)));
+                displayLat = lerp(lerpFromLat, lerpToLat, t);
+                displayLon = lerp(lerpFromLon, lerpToLon, t);
+                if (prevDispLat != null && prevDispLon != null) {
+                    var dM = turfDistanceKm(prevDispLat, prevDispLon, displayLat, displayLon) * 1000;
+                    if (dM > 0.5) {
+                        targetBearing = turfBearingDeg(prevDispLat, prevDispLon, displayLat, displayLon);
+                    }
+                }
+                smoothBearing = lerpAngleDeg(smoothBearing, targetBearing, 0.12);
+                if (driverMarkerInnerEl) {
+                    driverMarkerInnerEl.style.transform = 'rotate(' + smoothBearing + 'deg)';
+                }
+                driverMarker.setLngLat([displayLon, displayLat]);
+                prevDispLat = displayLat;
+                prevDispLon = displayLon;
+            }
+            if (followDriver && !userRecenterMode && displayLat != null && displayLon != null) {
+                var ref = liveUserLocation || userLocation;
+                var distKm = ref ? turfDistanceKm(displayLat, displayLon, ref.lat, ref.lon) : 999;
+                var wantPitch = distKm < NAV_3D_DISTANCE_KM ? 50 : 0;
+                var wantBearing = distKm < NAV_3D_DISTANCE_KM ? smoothBearing : 0;
+                var curPitch = map.getPitch();
+                var curBrg = map.getBearing();
+                map.setPitch(lerp(curPitch, wantPitch, 0.08));
+                map.setBearing(lerpAngleDeg(curBrg, wantBearing, 0.08));
+                map.setCenter([displayLon, displayLat]);
+            }
+            if (routeLineFeature && routeCoordsLngLat.length >= 2 && displayLat != null && displayLon != null) {
+                if (now - lastRouteTrimTs >= ROUTE_TRIM_MIN_MS) {
+                    lastRouteTrimTs = now;
+                    var trimmed = trimRouteToRemaining(displayLon, displayLat);
+                    setRouteOnMap(trimmed);
+                }
+            }
+            rafId = requestAnimationFrame(tickNavFrame);
+        }
+
         function startUserGeolocation() {
             if (!navigator.geolocation) return;
             navigator.geolocation.getCurrentPosition(
@@ -1759,15 +1963,12 @@ USER_TRACKING_HTML = """
                     var lat = p.coords.latitude, lon = p.coords.longitude;
                     if (!isValid(lat, lon)) return;
                     liveUserLocation = { lat: lat, lon: lon };
-                    if (userMarker) {
-                        userMarker.setLngLat([lon, lat]);
-                    } else {
+                    if (userMarker) userMarker.setLngLat([lon, lat]);
+                    else {
                         var dotEl = document.createElement('div');
                         dotEl.className = 'user-dot';
-                        userMarker = new maplibregl.Marker({
-                            element: dotEl,
-                            anchor: 'center'
-                        }).setLngLat([lon, lat]).addTo(map);
+                        userMarker = new maplibregl.Marker({ element: dotEl, anchor: 'center' })
+                            .setLngLat([lon, lat]).addTo(map);
                     }
                     map.easeTo({ center: [lon, lat], zoom: 15, duration: 500 });
                 },
@@ -1779,22 +1980,24 @@ USER_TRACKING_HTML = """
                     var lat = p.coords.latitude, lon = p.coords.longitude;
                     if (!isValid(lat, lon)) return;
                     liveUserLocation = { lat: lat, lon: lon };
-                    if (userMarker) {
-                        userMarker.setLngLat([lon, lat]);
-                    } else {
-                        var dotEl = document.createElement('div');
-                        dotEl.className = 'user-dot';
-                        userMarker = new maplibregl.Marker({
-                            element: dotEl,
-                            anchor: 'center'
-                        }).setLngLat([lon, lat]).addTo(map);
+                    if (userMarker) userMarker.setLngLat([lon, lat]);
+                    else {
+                        var dotEl2 = document.createElement('div');
+                        dotEl2.className = 'user-dot';
+                        userMarker = new maplibregl.Marker({ element: dotEl2, anchor: 'center' })
+                            .setLngLat([lon, lat]).addTo(map);
                     }
                 },
                 function() {},
                 { enableHighAccuracy: true, maximumAge: 5000 }
             );
         }
+
         async function init() {
+            if (typeof turf === 'undefined') {
+                document.getElementById('statusText').textContent = "Turf.js yuklanmadi";
+                return;
+            }
             if (!orderId) { document.getElementById('statusText').textContent = "Order ID topilmadi"; return; }
             var r = await fetch(API_BASE + '/api/webapp/order/' + orderId + '?v=' + Date.now(), { headers: { 'ngrok-skip-browser-warning': 'true' } });
             if (!r.ok) { document.getElementById('statusText').textContent = "Buyurtma topilmadi"; return; }
@@ -1817,11 +2020,7 @@ USER_TRACKING_HTML = """
                             maxzoom: 19
                         }
                     },
-                    layers: [{
-                        id: 'osm-tiles',
-                        type: 'raster',
-                        source: 'osm'
-                    }]
+                    layers: [{ id: 'osm-tiles', type: 'raster', source: 'osm' }]
                 },
                 center: [userLocation.lon, userLocation.lat],
                 zoom: 16,
@@ -1830,14 +2029,7 @@ USER_TRACKING_HTML = """
                 antialias: true
             });
             var pickupEl = document.createElement('div');
-            pickupEl.style.cssText = [
-                'width:32px',
-                'height:32px',
-                'background:#E53E3E',
-                'border-radius:50%',
-                'border:3px solid white',
-                'box-shadow:0 3px 12px rgba(0,0,0,0.5)'
-            ].join(';');
+            pickupEl.style.cssText = 'width:32px;height:32px;background:#E53E3E;border-radius:50%;border:3px solid white;box-shadow:0 3px 12px rgba(0,0,0,0.5)';
             pickupMarker = new maplibregl.Marker({ element: pickupEl, anchor: 'center' })
                 .setLngLat([userLocation.lon, userLocation.lat]).addTo(map);
 
@@ -1845,100 +2037,48 @@ USER_TRACKING_HTML = """
             dotHtml.className = 'user-dot';
             userMarker = new maplibregl.Marker({ element: dotHtml, anchor: 'center' })
                 .setLngLat([userLocation.lon, userLocation.lat]).addTo(map);
-            var driverEl = document.createElement('div');
-            driverEl.style.cssText = [
-                'width:48px',
-                'height:48px',
-                'background:#276EF1',
-                'border-radius:50%',
-                'border:3px solid white',
-                'box-shadow:0 4px 16px rgba(0,0,0,0.4)',
-                'display:flex',
-                'align-items:center',
-                'justify-content:center',
-                'font-size:26px',
-                'line-height:1'
-            ].join(';');
-            driverEl.innerHTML = '🚕';
-            driverMarker = new maplibregl.Marker({
-                element: driverEl,
-                anchor: 'center'
-            }).setLngLat([userLocation.lon, userLocation.lat]).addTo(map);
+
+            var driverWrap = document.createElement('div');
+            driverMarkerInnerEl = document.createElement('div');
+            driverMarkerInnerEl.className = 'driver-marker-inner';
+            driverMarkerInnerEl.innerHTML = '🚕';
+            driverWrap.appendChild(driverMarkerInnerEl);
+            driverMarker = new maplibregl.Marker({ element: driverWrap, anchor: 'center' })
+                .setLngLat([userLocation.lon, userLocation.lat]).addTo(map);
+
             startUserGeolocation();
-            /* Try to get user location immediately for centering */
             if (navigator.geolocation) {
                 navigator.geolocation.getCurrentPosition(
                     function(p) {
                         if (!isValid(p.coords.latitude, p.coords.longitude)) return;
                         liveUserLocation = { lat: p.coords.latitude, lon: p.coords.longitude };
                         if (userMarker) userMarker.setLngLat([p.coords.longitude, p.coords.latitude]);
-                        /* Center map on USER */
-                        map.easeTo({
-                            center: [p.coords.longitude, p.coords.latitude],
-                            zoom: 15,
-                            duration: 800
-                        });
+                        map.easeTo({ center: [p.coords.longitude, p.coords.latitude], zoom: 15, duration: 800 });
                     },
                     function() {},
                     { enableHighAccuracy: true, timeout: 8000 }
                 );
             }
             document.getElementById('btnRecenter').onclick = function() {
+                userRecenterMode = true;
+                followDriver = false;
                 var ref = liveUserLocation || userLocation;
                 if (map && ref) {
                     map.easeTo({
                         center: [ref.lon, ref.lat],
                         zoom: 16,
                         pitch: 0,
+                        bearing: 0,
                         duration: 500
                     });
                 }
+                setTimeout(function() { userRecenterMode = false; followDriver = true; }, 8000);
             };
-            updateDriverLocation();
-            setInterval(updateDriverLocation, 5000);
-        }
-        function buildTrackRouteGeoJSON(coords) {
-            return {
-                type: 'FeatureCollection',
-                features: [{
-                    type: 'Feature',
-                    geometry: {
-                        type: 'LineString',
-                        coordinates: coords.map(function(c) { return [c[1], c[0]]; })
-                    },
-                    properties: {}
-                }]
-            };
-        }
-
-        function drawRouteBetween(fromPos, toPos) {
-            if (!map || !fromPos || !toPos) return;
-            var url = 'https://router.project-osrm.org/route/v1/driving/'
-                + fromPos.lon + ',' + fromPos.lat + ';'
-                + toPos.lon + ',' + toPos.lat
-                + '?overview=full&geometries=geojson';
-            fetch(url)
-                .then(function(r) { return r.json(); })
-                .then(function(data) {
-                    if (!data || !data.routes || !data.routes.length) return;
-                    var r = data.routes[0];
-                    if (!r.geometry || !r.geometry.coordinates) return;
-                    var coords = r.geometry.coordinates.map(function(c) { return [c[1], c[0]]; });
-                    var geo = buildTrackRouteGeoJSON(coords);
-                    if (map.getSource('track-route')) {
-                        map.getSource('track-route').setData(geo);
-                    } else {
-                        map.addSource('track-route', { type: 'geojson', data: geo });
-                        map.addLayer({
-                            id: 'track-route-main',
-                            type: 'line',
-                            source: 'track-route',
-                            layout: { 'line-join': 'round', 'line-cap': 'round' },
-                            paint: { 'line-color': '#FFD600', 'line-width': 6 }
-                        });
-                    }
-                })
-                .catch(function() {});
+            map.on('load', function() {
+                updateDriverLocation();
+                setInterval(updateDriverLocation, POLL_MS);
+                rafId = requestAnimationFrame(tickNavFrame);
+            });
         }
 
         async function updateDriverLocation() {
@@ -1954,25 +2094,17 @@ USER_TRACKING_HTML = """
                 var lat = data.latitude, lon = data.longitude;
                 if (lat != null && lon != null && isValid(lat, lon)) {
                     driverLocation = { lat: lat, lon: lon };
-                    driverMarker.setLngLat([lon, lat]);
+                    var snapped = snapToRouteLine(lat, lon);
+                    var snappedLon = snapped[0], snappedLat = snapped[1];
+                    var forceRoute = !routeLineFeature || distanceFromRouteMeters(lat, lon) > OFF_ROUTE_M;
+                    if (userLocation) drawRouteBetween(userLocation, driverLocation, forceRoute);
+                    beginLerpTo(snappedLon, snappedLat);
                     var ref = liveUserLocation || userLocation;
                     if (ref) {
-                        var d = (function(lat1, lon1, lat2, lon2) {
-                            var R = 6371;
-                            var dLat = (lat2 - lat1) * Math.PI / 180;
-                            var dLon = (lon2 - lon1) * Math.PI / 180;
-                            var a = Math.sin(dLat / 2) * Math.sin(dLat / 2) +
-                                Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) *
-                                Math.sin(dLon / 2) * Math.sin(dLon / 2);
-                            var c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
-                            return R * c;
-                        })(lat, lon, ref.lat, ref.lon);
+                        var d = turfDistanceKm(lat, lon, ref.lat, ref.lon);
                         var min = Math.max(1, Math.round(d / AVG_KMH * 60));
                         if (etaEl) etaEl.textContent = min + ' daqiqa';
                     }
-                    if (userLocation) drawRouteBetween(userLocation, driverLocation);
-                    // Mijoz xaritasida focus har doim mijozga qaratiladi,
-                    // shuning uchun bu yerda fitMapBounds chaqirmaymiz.
                 }
             } catch (e) {}
         }
