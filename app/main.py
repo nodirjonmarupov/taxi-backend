@@ -1219,11 +1219,27 @@ HTML_CONTENT = """
                 if (!isValidCoord(lat, lng)) return;
                 if (heading == null || isNaN(heading)) heading = lastHeading;
                 lastHeading = heading;
-                var driverPos = { lat: lat, lng: lng };
-                if (routeCoordinates && routeCoordinates.length >= 2) {
-                    var snapped = snapToRoute(lat, lng);
-                    driverPos = { lat: snapped[0], lng: snapped[1] };
+                // Yo'lga snapping: Turf mavjud bo'lsa aniq geodezik, aks holda sodda geometriya
+                var sl = lat, sa = lng;
+                if (typeof turf !== 'undefined' && _driverRouteLine && _driverRouteLine.geometry) {
+                    try {
+                        var _snapPt = turf.point([lng, lat]);
+                        var _snapRes = turf.nearestPointOnLine(_driverRouteLine, _snapPt, { units: 'kilometers' });
+                        if (_snapRes && _snapRes.geometry && _snapRes.geometry.coordinates) {
+                            sa = _snapRes.geometry.coordinates[0]; // lon
+                            sl = _snapRes.geometry.coordinates[1]; // lat
+                        }
+                    } catch (_e) {
+                        if (routeCoordinates && routeCoordinates.length >= 2) {
+                            var _fb = snapToRoute(lat, lng);
+                            sl = _fb[0]; sa = _fb[1];
+                        }
+                    }
+                } else if (routeCoordinates && routeCoordinates.length >= 2) {
+                    var _fb2 = snapToRoute(lat, lng);
+                    sl = _fb2[0]; sa = _fb2[1];
                 }
+                var driverPos = { lat: sl, lng: sa };
                 var now = Date.now();
                 var speedKmh = 0;
                 if (lastDriverLocation && lastPositionTime) {
@@ -1234,12 +1250,6 @@ HTML_CONTENT = """
                 if (lastGpsSpeedKmh != null && !isNaN(lastGpsSpeedKmh) && lastGpsSpeedKmh > 0) speedKmh = lastGpsSpeedKmh;
                 lastPositionTime = now;
                 lastDriverLocation = { lat: lat, lon: lng };
-                var sl = lat, sa = lng;
-                if (routeCoordinates.length >= 2) {
-                    var snap = snapToRoute(lat, lng);
-                    sl = snap[0];
-                    sa = snap[1];
-                }
                 pLat = lat;
                 pLng = lng;
                 tLat = sl;
