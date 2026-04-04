@@ -114,7 +114,19 @@ async def deduct_commission_on_trip_complete(
                 from app.crud.user import DriverCRUD, UserCRUD
                 from app.models.user import User, BalanceTransaction
 
+                # ── 0. Detached order'ni yangi sessiyaga bog'lash ──
+                # Caller sessiyasi allaqachon commit/close bo'lgan; merge()
+                # obyektni bu sessiyaning identity map'iga ko'chiradi va
+                # DetachedInstanceError'dan himoya qiladi.
+                # ESLATMA: session.refresh(order, ["tariff"]) ISHLATILMAYDI —
+                # Order modelida "tariff" munosabati mavjud emas (InvalidRequestError).
+                # "driver" munosabatini refresh qilish ham shart emas —
+                # driver quyida DriverCRUD.get_by_id() orqali yangi yuklanadi.
+                order = await session.merge(order)
+
                 # ── 1. Order row'ni lock qilish (idempotent himoya) ──
+                # merge() dan keyin select().with_for_update() xuddi shu
+                # identity-map ob'ektini qaytaradi (bir xil Python instance).
                 order_db = await session.execute(
                     select(Order).where(Order.id == order_id).with_for_update()
                 )
