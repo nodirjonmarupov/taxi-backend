@@ -329,6 +329,7 @@ HTML_CONTENT = """
     </div>
 
     <script src="https://cdn.jsdelivr.net/npm/maplibre-gl@3.6.2/dist/maplibre-gl.js"></script>
+    <script src="https://unpkg.com/@turf/turf@6/turf.min.js?v=8.0.0"></script>
     <script>
         (function(){
             var tg = (window.Telegram && window.Telegram.WebApp) ? window.Telegram.WebApp : null;
@@ -347,6 +348,9 @@ HTML_CONTENT = """
         let map, tileLayer, driverMarker, clientMarker, destMarker, routeControl, routeControlAB;
         let routeRoadDistanceKm = null;
         let routeInstructions = [], routeCoordinates = [], routePolyline = null, routeDecorator = null;
+        // Turf route line feature (haydovchi uchun snapping va progressive trim)
+        let _driverRouteLine = null;       // turf.lineString — [lon,lat] koordinatlarda
+        let _driverRouteCoords = [];       // [[lon,lat], ...] — OSRM raw coords (GeoJSON tartib)
         let map2dMode = true;
         let arrowEl = null;
         let tLat = null, tLng = null, dLat = null, dLng = null, brg = 0, spd = 0;
@@ -1031,7 +1035,24 @@ HTML_CONTENT = """
             if (!distOk || !timeOk) return;
             lastSentLocation = { lat: lat, lon: lng };
             lastSentTime = now;
-            var body = { driver_id: ORDER_DATA.driver_id, latitude: lat, longitude: lng, heading: heading };
+            // Snapped koordinatani hisoblash (Turf mavjud bo'lsa)
+            var sLat = lat, sLng = lng;
+            if (typeof turf !== 'undefined' && _driverRouteLine && _driverRouteLine.geometry) {
+                try {
+                    var pt = turf.point([lng, lat]);
+                    var snapped = turf.nearestPointOnLine(_driverRouteLine, pt, { units: 'kilometers' });
+                    if (snapped && snapped.geometry && snapped.geometry.coordinates) {
+                        sLng = snapped.geometry.coordinates[0];
+                        sLat = snapped.geometry.coordinates[1];
+                    }
+                } catch (_) {}
+            }
+            var body = {
+                driver_id: ORDER_DATA.driver_id,
+                latitude: lat, longitude: lng,
+                snapped_latitude: sLat, snapped_longitude: sLng,
+                heading: heading
+            };
             if (ORDER_ID_CURRENT) body.order_id = parseInt(ORDER_ID_CURRENT, 10);
             fetch(API_BASE_URL + '/api/webapp/update_driver_location?v=' + Date.now(), {
                 method: 'POST',
@@ -1224,6 +1245,8 @@ HTML_CONTENT = """
                 tLat = sl;
                 tLng = sa;
                 spd = speedKmh;
+                // Progressive route trim (sariq chiziqning o'tib ketgan qismini o'chirib borish)
+                updateProgressiveRoute(sa, sl); // (lon, lat) tartibida
                 if (heading != null && !isNaN(heading)) {
                     headingBuffer.push(heading);
                     if (headingBuffer.length > 5) headingBuffer.shift();
@@ -1456,12 +1479,16 @@ HTML_CONTENT = """
                     }
                     if (r.geometry && r.geometry.coordinates) {
                         routeCoordinates = r.geometry.coordinates.map(function(c) { return [c[1], c[0]]; }); // [lat,lng]
+                        _driverRouteCoords = r.geometry.coordinates.slice(); // [lon,lat] GeoJSON tartib
                     }
                     if (!routeCoordinates.length) {
                         fallbackStraightLine(fromLat, fromLng, toLat, toLng);
                         return;
                     }
-
+                    // Turf line feature qurish (snapping va progressive trim uchun)
+                    if (typeof turf !== 'undefined' && _driverRouteCoords.length >= 2) {
+                        try { _driverRouteLine = turf.lineString(_driverRouteCoords); } catch (_) {}
+                    }
                     var routeGeoJSON = buildRouteGeoJSON(routeCoordinates);
                     safeAddRouteLayer(routeGeoJSON);
                     setTurnAndDistFromDriver({ lat: fromLat, lng: fromLng });
@@ -1471,6 +1498,31 @@ HTML_CONTENT = """
                     clearTimeout(timeoutId);
                     fallbackStraightLine(fromLat, fromLng, toLat, toLng);
                 });
+        }
+
+        /**
+         * Progressive trim: haydovchi o'tib ketgan yo'l qismini o'chirib,
+         * faqat haydovchidan pickup gacha sariq chiziqni xaritada ko'rsatadi.
+         * driverLon, driverLat — snapped yoki GPS koordinatalar [lon, lat].
+         */
+        function updateProgressiveRoute(driverLon, driverLat) {
+            if (typeof turf === 'undefined') return;
+            if (!_driverRouteLine || !_driverRouteCoords || _driverRouteCoords.length < 2) return;
+            try {
+                var drvPt = turf.point([driverLon, driverLat]);
+                var snapped = turf.nearestPointOnLine(_driverRouteLine, drvPt, { units: 'kilometers' });
+                if (!snapped || !snapped.geometry) return;
+                // Manzil (pickup) = marshrutning oxirgi nuqtasi [lon, lat]
+                var destCoord = _driverRouteCoords[_driverRouteCoords.length - 1];
+                var destPt = turf.point(destCoord);
+                // Haydovchi dan manzilga qadar qolgan yo'l
+                var remaining = turf.lineSlice(snapped, destPt, _driverRouteLine);
+                if (!remaining || !remaining.geometry || !remaining.geometry.coordinates || remaining.geometry.coordinates.length < 2) return;
+                // [lon,lat] → [lat,lng] konversiya
+                var trimCoords = remaining.geometry.coordinates.map(function(c) { return [c[1], c[0]]; });
+                var geo = buildRouteGeoJSON(trimCoords);
+                safeAddRouteLayer(geo);
+            } catch (_) {}
         }
 
         function fallbackStraightLine(fromLat, fromLng, toLat, toLng) {
@@ -1697,9 +1749,9 @@ USER_TRACKING_HTML = """
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate" />
-    <meta http-equiv="Pragma" content="no-cache" />
-    <meta http-equiv="Expires" content="0" />
+    <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+    <meta http-equiv="Pragma" content="no-cache">
+    <meta http-equiv="Expires" content="0">
     <title>Taksi yetib kelmoqda</title>
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
@@ -1715,31 +1767,18 @@ USER_TRACKING_HTML = """
         .car-info { color: rgba(255,255,255,0.7); font-size: 14px; margin-bottom: 8px; }
         .eta { font-size: 24px; color: #276EF1; font-weight: bold; }
         .user-dot {
-            width: 28px;
-            height: 28px;
-            background: #276EF1;
-            border-radius: 50%;
+            width: 28px; height: 28px; background: #276EF1; border-radius: 50%;
             border: 4px solid white;
-            box-shadow: 0 0 0 6px rgba(39,110,241,0.35),
-                        0 4px 12px rgba(0,0,0,0.3);
+            box-shadow: 0 0 0 6px rgba(39,110,241,0.35), 0 4px 12px rgba(0,0,0,0.3);
             animation: pulse 1.5s ease-in-out infinite;
         }
-        @keyframes pulse { 0%,100% { transform: scale(1); opacity: 1; } 50% { transform: scale(1.15); opacity: 0.85; } }
-        .btn-recenter { position: fixed; bottom: 20px; right: 20px; z-index: 1000; padding: 12px 18px; border-radius: 12px; border: none; background: rgba(39,110,241,0.95); color: white; font-weight: 600; cursor: pointer; box-shadow: 0 2px 12px rgba(0,0,0,0.3); }
+        @keyframes pulse { 0%,100% { transform:scale(1);opacity:1; } 50% { transform:scale(1.15);opacity:.85; } }
+        .btn-recenter { position:fixed; bottom:20px; right:20px; z-index:1000; padding:12px 18px; border-radius:12px; border:none; background:rgba(39,110,241,0.95); color:#fff; font-weight:600; cursor:pointer; box-shadow:0 2px 12px rgba(0,0,0,0.3); }
         .driver-marker-inner {
-            width: 48px;
-            height: 48px;
-            background: #276EF1;
-            border-radius: 50%;
-            border: 3px solid white;
-            box-shadow: 0 4px 16px rgba(0,0,0,0.4);
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            font-size: 26px;
-            line-height: 1;
-            transform-origin: center center;
-            will-change: transform;
+            width:48px; height:48px; background:#276EF1; border-radius:50%;
+            border:3px solid white; box-shadow:0 4px 16px rgba(0,0,0,0.4);
+            display:flex; align-items:center; justify-content:center;
+            font-size:26px; line-height:1; transform-origin:center center; will-change:transform;
         }
     </style>
 </head>
@@ -1750,539 +1789,259 @@ USER_TRACKING_HTML = """
         <div class="car-info" id="carInfo">—</div>
         <div class="eta" id="eta">— daqiqa</div>
     </div>
-    <button class="btn-recenter" id="btnRecenter">Mening joyim</button>
+    <button class="btn-recenter" id="btnRecenter">📍 Haydovchi</button>
     <script>
-        /* ── Dynamic resource loader (Date.now() = cache busting) ── */
+        /* ── Dynamic resource loader: MapLibre + kesh o'ldirish ── */
         (function() {
             var _V = Date.now();
-            // MapLibre CSS
             var _css = document.createElement('link');
             _css.rel = 'stylesheet';
             _css.href = 'https://cdn.jsdelivr.net/npm/maplibre-gl@3.6.2/dist/maplibre-gl.css?v=' + _V;
             document.head.appendChild(_css);
-            // Telegram WebApp (non-blocking)
-            var _tgScript = document.createElement('script');
-            _tgScript.src = 'https://telegram.org/js/telegram-web-app.js?v=' + _V;
-            document.head.appendChild(_tgScript);
-            // Turf → MapLibre → init (sequential, blocking)
-            function _loadScript(src, cb) {
-                var s = document.createElement('script');
-                s.src = src + '?v=' + _V;
-                s.onload = cb || function() {};
-                s.onerror = function() { console.error('[LOAD ERROR]', src); };
-                document.head.appendChild(s);
-            }
-            _loadScript('https://unpkg.com/@turf/turf@6/turf.min.js', function() {
-                _loadScript('https://cdn.jsdelivr.net/npm/maplibre-gl@3.6.2/dist/maplibre-gl.js', function() {
-                    init();
-                });
-            });
+            var _tg = document.createElement('script');
+            _tg.src = 'https://telegram.org/js/telegram-web-app.js?v=' + _V;
+            document.head.appendChild(_tg);
+            var _ml = document.createElement('script');
+            _ml.src = 'https://cdn.jsdelivr.net/npm/maplibre-gl@3.6.2/dist/maplibre-gl.js?v=' + _V;
+            _ml.onload = function() { init(); };
+            document.head.appendChild(_ml);
         })();
-        /* ── tg lazily resolved after Telegram script loads ── */
-        function getTg() {
-            return (window.Telegram && window.Telegram.WebApp)
-                ? window.Telegram.WebApp
-                : { expand: function() {}, ready: function() {} };
-        }
-        var map, driverMarker, userMarker, pickupMarker, driverMarkerInnerEl;
+
+        /* ── State ── */
+        var map, driverMarker, driverMarkerInnerEl, userMarker, pickupMarker;
         var urlParams = new URLSearchParams(window.location.search);
         var orderId = urlParams.get('order_id');
         var API_BASE = window.location.origin;
         var userLocation = null;
         var liveUserLocation = null;
-        var driverLocation = null;
-        var AVG_KMH = 40;
-        var OFF_ROUTE_M = 40;
-        var NAV_3D_DISTANCE_KM = 0.5;
         var POLL_MS = 5000;
-        var LERP_MS = 5000;
-        var routeLineFeature = null;
-        var routeCoordsLngLat = [];
-        var routeFetchInFlight = false;
+        var LERP_MS = 4500;
+        var AVG_KMH = 40;
         var followDriver = true;
         var displayLat = null, displayLon = null;
         var lerpFromLat, lerpFromLon, lerpToLat, lerpToLon;
         var lerpStartTs = 0;
-        var smoothBearing = 0;
-        var targetBearing = 0;
-        var routeSegmentBearing = 0;
         var prevDispLat = null, prevDispLon = null;
+        var smoothBearing = 0, targetBearing = 0;
+        var smoothMapBearing = 0, smoothMapPitch = 0;
         var rafId = null;
         var lastUserInteractMs = 0;
         var IDLE_FOLLOW_MS = 10000;
         var ignoreInteractionUntilMs = 0;
         var cameraProgrammatic = false;
-        var smoothMapBearing = 0;
-        var smoothMapPitch = 0;
-        var NAV_PITCH_DEG = 55;
-        var _snapLogTs = 0;
-        var _snapLogKey = '';
+        var NAV_PITCH_DEG = 45;
+        var NAV_3D_DISTANCE_KM = 0.8;
 
         function isValid(lat, lon) {
-            return lat != null && lon != null && !isNaN(lat) && !isNaN(lon) && lat >= -90 && lat <= 90 && lon >= -180 && lon <= 180;
-        }
-        function fitMapBounds() { return; }
-
-        function turfPt(lon, lat) { return turf.point([lon, lat]); }
-        function turfDistanceKm(aLat, aLon, bLat, bLon) {
-            return turf.distance(turfPt(aLon, aLat), turfPt(bLon, bLat), { units: 'kilometers' });
-        }
-        function turfBearingDeg(fromLat, fromLon, toLat, toLon) {
-            return turf.bearing(turfPt(fromLon, fromLat), turfPt(toLon, toLat));
+            return lat != null && lon != null && !isNaN(lat) && !isNaN(lon)
+                && lat >= -90 && lat <= 90 && lon >= -180 && lon <= 180;
         }
         function lerp(a, b, t) { return a + (b - a) * t; }
-        function lerpAngleDeg(a, b, t) {
+        function lerpAngle(a, b, t) {
             var d = ((((b - a) % 360) + 540) % 360) - 180;
             return a + d * t;
         }
-        function easeOutCubic(t) { return 1 - Math.pow(1 - t, 3); }
-
-        function buildLineStringFeature(coordsLngLat) {
-            return turf.lineString(coordsLngLat);
+        function easeOut(t) { return 1 - Math.pow(1 - t, 3); }
+        function haversineKm(aLat, aLon, bLat, bLon) {
+            var R = 6371, toRad = Math.PI / 180;
+            var dLat = (bLat - aLat) * toRad, dLon = (bLon - aLon) * toRad;
+            var a = Math.sin(dLat/2)*Math.sin(dLat/2)
+                  + Math.cos(aLat*toRad)*Math.cos(bLat*toRad)*Math.sin(dLon/2)*Math.sin(dLon/2);
+            return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
         }
-        function buildTrackRouteGeoJSON(coordsLngLat) {
-            return {
-                type: 'FeatureCollection',
-                features: [{
-                    type: 'Feature',
-                    geometry: { type: 'LineString', coordinates: coordsLngLat },
-                    properties: {}
-                }]
-            };
-        }
-
-        /** Marshrut bo'lsa — faqat yo'l ustidagi nuqta; aks holda null (GPS markerga qo'yilmaydi) */
-        function snapToRouteLineForced(lat, lon) {
-            if (!routeLineFeature || !routeCoordsLngLat || routeCoordsLngLat.length < 2) return null;
-            var pt = turfPt(lon, lat);
-            var snapped = turf.nearestPointOnLine(routeLineFeature, pt, { units: 'kilometers' });
-            if (!snapped || !snapped.geometry || !snapped.geometry.coordinates) return null;
-            var segIdx = (snapped.properties && typeof snapped.properties.index === 'number')
-                ? snapped.properties.index : 0;
-            segIdx = Math.max(0, Math.min(segIdx, routeCoordsLngLat.length - 2));
-            return {
-                lon: snapped.geometry.coordinates[0],
-                lat: snapped.geometry.coordinates[1],
-                segIndex: segIdx
-            };
+        function bearingDeg(fromLat, fromLon, toLat, toLon) {
+            var toRad = Math.PI / 180, toDeg = 180 / Math.PI;
+            var dLon = (toLon - fromLon) * toRad;
+            var y = Math.sin(dLon) * Math.cos(toLat * toRad);
+            var x = Math.cos(fromLat * toRad) * Math.sin(toLat * toRad)
+                  - Math.sin(fromLat * toRad) * Math.cos(toLat * toRad) * Math.cos(dLon);
+            return (Math.atan2(y, x) * toDeg + 360) % 360;
         }
 
-        /**
-         * KakaoNavi Hard Lock:
-         *  - Marshrut mavjud bo'lsa — DOIM nearestPointOnLine ga yopish (mesofadan qat'i nazar)
-         *  - Faqat marshrut yo'q bo'lsa GPS dan foydalan
-         */
-        var _logCheckTs = 0;
-        function resolveDriverDisplayPoint(lat, lon) {
-            var now = performance.now();
-            if (now - _logCheckTs > 2000) { _logCheckTs = now; console.log("LOG_CHECK: V8 is Running"); }
-            // #region agent log
-            function _snapDbg(msg, dM) {
-                fetch('http://127.0.0.1:7602/ingest/b6487788-bee6-445f-81f9-95a1b43ce854', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json', 'X-Debug-Session-Id': '7969f2' },
-                    body: JSON.stringify({ sessionId: '7969f2', location: 'main.py:resolveDriverDisplayPoint', message: msg, data: { dM: dM }, timestamp: Date.now(), hypothesisId: 'H1-hardsnap' })
-                }).catch(function () {});
-            }
-            // #endregion
-            function throttleLog(label, dM) {
-                if (label !== _snapLogKey || (now - _snapLogTs) > 1500) {
-                    _snapLogKey = label; _snapLogTs = now;
-                    console.log(label + (dM != null ? ' | GPS-route: ' + Math.round(dM) + 'm' : ''));
-                }
-            }
-            if (!routeLineFeature || !routeCoordsLngLat || routeCoordsLngLat.length < 2) {
-                throttleLog('SNAP: Off Route (GPS) — no route yet', null);
-                _snapDbg('no_route', null);
-                return { lon: lon, lat: lat, segIndex: null, snapped: false };
-            }
-            // HARD LOCK: nearestPointOnLine — mesofadan qat'i nazar
-            var s = snapToRouteLineForced(lat, lon);
-            if (!s) {
-                var dFallback = distanceFromRouteMeters(lat, lon);
-                throttleLog('SNAP: Off Route (GPS) — nearestPointOnLine failed', dFallback);
-                _snapDbg('nearest_failed', dFallback);
-                return { lon: lon, lat: lat, segIndex: null, snapped: false };
-            }
-            var dSnap = distanceFromRouteMeters(lat, lon);
-            throttleLog('SNAP: On Route', dSnap);
-            _snapDbg('snapped', dSnap);
-            return { lon: s.lon, lat: s.lat, segIndex: s.segIndex, snapped: true };
-        }
-
-        /**
-         * Marshrut segmenti bo'ylab harakatlanish yo'nalishi.
-         * coords[0] = pickup (manzil), haydovchi coords[last] → coords[0] tomon harakatlanadi.
-         * segIndex = nearestPointOnLine.properties.index (segment boshlang'ich vertex).
-         * Segment: coords[segIndex] → coords[segIndex+1].
-         * Harakatlanish yo'nalishi: coords[0] ga yaqin tomonga, ya'ni dA < dB bo'lsa b→a.
-         */
-        function bearingFromRouteSegment(segIndex) {
-            var coords = routeCoordsLngLat;
-            if (!coords || coords.length < 2) return smoothBearing;
-            var idx = Math.max(0, Math.min(segIndex, coords.length - 2));
-            var a = coords[idx];
-            var b = coords[idx + 1];
-            // pickup (destination) = coords[0]; driver moves toward it
-            var dest = turf.point(coords[0]);
-            var dA = turf.distance(turf.point(a), dest, { units: 'kilometers' });
-            var dB = turf.distance(turf.point(b), dest, { units: 'kilometers' });
-            // a yaqin => harakatlanish b→a; b yaqin => a→b
-            return dA <= dB
-                ? turf.bearing(turf.point(b), turf.point(a))
-                : turf.bearing(turf.point(a), turf.point(b));
-        }
-
-        function distanceFromRouteMeters(lat, lon) {
-            if (!routeLineFeature || !routeCoordsLngLat || routeCoordsLngLat.length < 2) return 0;
-            try {
-                return turf.pointToLineDistance(turfPt(lon, lat), routeLineFeature, { units: 'meters' });
-            } catch (e) { return 9999; }
-        }
-
-        /**
-         * Progressive Route (KakaoNavi): haydovchi o'tib ketgan yo'lni o'chirib,
-         * faqat haydovchidan pickup (coords[0]) gacha qolgan sariq chiziqni ko'rsat.
-         * coords[0] = pickup; haydovchi coords[last] → coords[0] tomon keladi.
-         * Remaining = lineSlice(driverSnapped, pickupPt) = driver dan pickup ga.
-         */
-        function trimRouteToRemaining(displayLon, displayLat) {
-            if (!routeLineFeature || !routeCoordsLngLat || routeCoordsLngLat.length < 2) return routeCoordsLngLat.slice();
-            try {
-                var drvPt = turf.point([displayLon, displayLat]);
-                var snapped = turf.nearestPointOnLine(routeLineFeature, drvPt, { units: 'kilometers' });
-                if (!snapped || !snapped.geometry) return routeCoordsLngLat.slice();
-                // pickupPt = coords[0] — manzil, shu tomonga haydovchi harakatlanadi
-                var pickupPt = turf.point(routeCoordsLngLat[0]);
-                // Haydovchidan pickup gacha qolgan yo'l (progressive trim)
-                var remaining = turf.lineSlice(snapped, pickupPt, routeLineFeature);
-                if (remaining && remaining.geometry && remaining.geometry.coordinates && remaining.geometry.coordinates.length >= 2) {
-                    return remaining.geometry.coordinates;
-                }
-            } catch (e) { /* fallback: butun yo'lni ko'rsat */ }
-            return routeCoordsLngLat.slice();
-        }
-
-        function setRouteOnMap(coordsLngLat) {
-            if (!map || !coordsLngLat || coordsLngLat.length < 2) return;
-            var geo = buildTrackRouteGeoJSON(coordsLngLat);
-            if (map.getSource('track-route')) {
-                map.getSource('track-route').setData(geo);
-            } else {
-                map.addSource('track-route', { type: 'geojson', data: geo });
-                map.addLayer({
-                    id: 'track-route-main',
-                    type: 'line',
-                    source: 'track-route',
-                    layout: { 'line-join': 'round', 'line-cap': 'round' },
-                    paint: { 'line-color': '#FFD600', 'line-width': 6 }
-                });
-            }
-        }
-
-        function drawRouteBetween(fromPos, toPos, forceRefresh) {
-            if (!map || !fromPos || !toPos) return;
-            if (routeFetchInFlight) return;
-            var needFetch = forceRefresh || !routeLineFeature || routeCoordsLngLat.length < 2;
-            if (!needFetch) {
-                var offM = distanceFromRouteMeters(toPos.lat, toPos.lon);
-                if (offM > OFF_ROUTE_M) needFetch = true;
-            }
-            if (!needFetch) {
-                var trimmed = trimRouteToRemaining(displayLon != null ? displayLon : toPos.lon, displayLat != null ? displayLat : toPos.lat);
-                setRouteOnMap(trimmed);
-                return;
-            }
-            routeFetchInFlight = true;
-            var url = 'https://router.project-osrm.org/route/v1/driving/'
-                + fromPos.lon + ',' + fromPos.lat + ';'
-                + toPos.lon + ',' + toPos.lat
-                + '?overview=full&geometries=geojson';
-            fetch(url)
-                .then(function(r) { return r.json(); })
-                .then(function(data) {
-                    routeFetchInFlight = false;
-                    if (!data || !data.routes || !data.routes.length) return;
-                    var rr = data.routes[0];
-                    if (!rr.geometry || !rr.geometry.coordinates) return;
-                    routeCoordsLngLat = rr.geometry.coordinates.slice();
-                    routeLineFeature = buildLineStringFeature(routeCoordsLngLat);
-                    var trimmed = trimRouteToRemaining(displayLon != null ? displayLon : toPos.lon, displayLat != null ? displayLat : toPos.lat);
-                    setRouteOnMap(trimmed);
-                })
-                .catch(function() { routeFetchInFlight = false; });
-        }
-
-        function beginLerpTo(snappedLon, snappedLat) {
+        /* ── Lerp target yangilash ── */
+        function beginLerpTo(lon, lat) {
             if (displayLat == null || displayLon == null) {
-                displayLat = snappedLat;
-                displayLon = snappedLon;
-                lerpFromLat = snappedLat; lerpFromLon = snappedLon;
-                lerpToLat = snappedLat; lerpToLon = snappedLon;
+                displayLat = lat; displayLon = lon;
+                lerpFromLat = lat; lerpFromLon = lon;
+                lerpToLat = lat; lerpToLon = lon;
                 lerpStartTs = performance.now();
-                driverMarker.setLngLat([displayLon, displayLat]);
+                if (driverMarker) driverMarker.setLngLat([lon, lat]);
                 return;
             }
-            lerpFromLat = displayLat;
-            lerpFromLon = displayLon;
-            lerpToLat = snappedLat;
-            lerpToLon = snappedLon;
+            lerpFromLat = displayLat; lerpFromLon = displayLon;
+            lerpToLat = lat; lerpToLon = lon;
             lerpStartTs = performance.now();
         }
 
+        /* ── Kamera ── */
         function onUserMapInteraction() {
             if (performance.now() < ignoreInteractionUntilMs) return;
             if (cameraProgrammatic) return;
             followDriver = false;
             lastUserInteractMs = performance.now();
-            try {
-                if (map && typeof map.setPadding === 'function') {
-                    map.setPadding({ top: 0, bottom: 0, left: 0, right: 0 });
-                }
-            } catch (_) {}
         }
-
-        function wireMapInteractionHandlers() {
+        function wireInteractionHandlers() {
             if (!map) return;
             map.on('dragstart', onUserMapInteraction);
-            map.on('rotatestart', function(e) {
-                if (e && e.originalEvent) onUserMapInteraction();
-            });
             map.on('zoomstart', onUserMapInteraction);
+            map.on('rotatestart', function(e) { if (e && e.originalEvent) onUserMapInteraction(); });
         }
-
         function easeFollowToDriver() {
-            if (!map || displayLat == null || displayLon == null) return;
+            if (!map || displayLat == null) return;
             cameraProgrammatic = true;
-            var pad = { top: 0, bottom: 0, left: 0, right: 0 };
-            map.easeTo({
-                center: [displayLon, displayLat],
-                zoom: 17,
-                pitch: NAV_PITCH_DEG,
-                bearing: smoothBearing,
-                padding: pad,
-                duration: 1000
-            });
+            map.easeTo({ center: [displayLon, displayLat], zoom: 17, pitch: NAV_PITCH_DEG, bearing: smoothBearing, duration: 900 });
             setTimeout(function() {
-                try {
-                    if (typeof map.setPadding === 'function') map.setPadding(pad);
-                    smoothMapPitch = map.getPitch();
-                    smoothMapBearing = map.getBearing();
-                } catch (e3) {}
+                try { smoothMapPitch = map.getPitch(); smoothMapBearing = map.getBearing(); } catch (_) {}
                 cameraProgrammatic = false;
-            }, 1050);
+            }, 950);
         }
 
+        /* ── rAF: animatsiya + kuzatish ── */
         function tickNavFrame(now) {
             if (!map || !driverMarker) { rafId = requestAnimationFrame(tickNavFrame); return; }
-            if (displayLat != null && displayLon != null && lerpStartTs > 0) {
-                var rawT = (now - lerpStartTs) / LERP_MS;
-                var t = Math.min(1, Math.max(0, easeOutCubic(rawT)));
+            /* Lerp */
+            if (displayLat != null && lerpStartTs > 0) {
+                var t = Math.min(1, easeOut((now - lerpStartTs) / LERP_MS));
                 displayLat = lerp(lerpFromLat, lerpToLat, t);
                 displayLon = lerp(lerpFromLon, lerpToLon, t);
-                // Hard lock: lerp oraliq nuqtasini ham yo'l ustiga yopish
-                var rdp = resolveDriverDisplayPoint(displayLat, displayLon);
-                displayLat = rdp.lat;
-                displayLon = rdp.lon;
-                if (rdp.snapped && rdp.segIndex != null) {
-                    // Marshrut segmentining yo'nalishi — marker yo'lga qarab tursin
-                    routeSegmentBearing = bearingFromRouteSegment(rdp.segIndex);
-                    targetBearing = routeSegmentBearing;
-                } else if (prevDispLat != null && prevDispLon != null) {
-                    // GPS rejimida: harakat yo'nalishi
-                    var movedKm = turfDistanceKm(prevDispLat, prevDispLon, displayLat, displayLon);
-                    if (movedKm > 0.00003) {
-                        targetBearing = turfBearingDeg(prevDispLat, prevDispLon, displayLat, displayLon);
-                    }
+                /* Bearing from movement */
+                if (prevDispLat != null) {
+                    var km = haversineKm(prevDispLat, prevDispLon, displayLat, displayLon);
+                    if (km > 0.000025) targetBearing = bearingDeg(prevDispLat, prevDispLon, displayLat, displayLon);
                 }
-                smoothBearing = lerpAngleDeg(smoothBearing, targetBearing, 0.14);
-                if (driverMarkerInnerEl) {
-                    driverMarkerInnerEl.style.transform = 'rotate(' + smoothBearing + 'deg)';
-                }
+                smoothBearing = lerpAngle(smoothBearing, targetBearing, 0.14);
+                if (driverMarkerInnerEl) driverMarkerInnerEl.style.transform = 'rotate(' + smoothBearing + 'deg)';
                 driverMarker.setLngLat([displayLon, displayLat]);
-                prevDispLat = displayLat;
-                prevDispLon = displayLon;
+                prevDispLat = displayLat; prevDispLon = displayLon;
             }
-            if (followDriver && !cameraProgrammatic && displayLat != null && displayLon != null) {
+            /* Kuzatish (follow) */
+            if (followDriver && !cameraProgrammatic && displayLat != null) {
                 var ref = liveUserLocation || userLocation;
-                var distKm = ref ? turfDistanceKm(displayLat, displayLon, ref.lat, ref.lon) : 999;
+                var distKm = ref ? haversineKm(displayLat, displayLon, ref.lat, ref.lon) : 999;
                 var wantPitch = distKm < NAV_3D_DISTANCE_KM ? NAV_PITCH_DEG : 0;
-                var wantBearing = smoothBearing;
                 smoothMapPitch = lerp(smoothMapPitch, wantPitch, 0.1);
-                smoothMapBearing = lerpAngleDeg(smoothMapBearing, wantBearing, 0.1);
+                smoothMapBearing = lerpAngle(smoothMapBearing, smoothBearing, 0.1);
                 map.setPitch(smoothMapPitch);
                 map.setBearing(smoothMapBearing);
-                try {
-                    if (typeof map.setPadding === 'function') {
-                        map.setPadding({ top: 0, bottom: 0, left: 0, right: 0 });
-                    }
-                    map.setCenter([displayLon, displayLat]);
-                } catch (e2) {
-                    map.setCenter([displayLon, displayLat]);
-                }
+                map.setCenter([displayLon, displayLat]);
             }
-            // Force refresh: throttle yo'q — har kadrda progressive trim
-            if (routeLineFeature && routeCoordsLngLat.length >= 2 && displayLat != null && displayLon != null) {
-                var trimmed = trimRouteToRemaining(displayLon, displayLat);
-                setRouteOnMap(trimmed);
+            /* 10 s idle → qayta kuzatish */
+            if (!followDriver && displayLat != null
+                    && performance.now() > ignoreInteractionUntilMs
+                    && (performance.now() - lastUserInteractMs) >= IDLE_FOLLOW_MS) {
+                followDriver = true;
+                easeFollowToDriver();
             }
             rafId = requestAnimationFrame(tickNavFrame);
         }
 
+        /* ── Foydalanuvchi GPS (ixtiyoriy) ── */
         function startUserGeolocation() {
             if (!navigator.geolocation) return;
-            navigator.geolocation.getCurrentPosition(
-                function(p) {
-                    var lat = p.coords.latitude, lon = p.coords.longitude;
-                    if (!isValid(lat, lon)) return;
-                    liveUserLocation = { lat: lat, lon: lon };
-                    if (userMarker) userMarker.setLngLat([lon, lat]);
-                    else {
-                        var dotEl = document.createElement('div');
-                        dotEl.className = 'user-dot';
-                        userMarker = new maplibregl.Marker({ element: dotEl, anchor: 'center' })
-                            .setLngLat([lon, lat]).addTo(map);
-                    }
-                    map.easeTo({ center: [lon, lat], zoom: 15, duration: 500 });
-                },
-                function() {},
-                { enableHighAccuracy: true, timeout: 10000 }
-            );
-            navigator.geolocation.watchPosition(
-                function(p) {
-                    var lat = p.coords.latitude, lon = p.coords.longitude;
-                    if (!isValid(lat, lon)) return;
-                    liveUserLocation = { lat: lat, lon: lon };
-                    if (userMarker) userMarker.setLngLat([lon, lat]);
-                    else {
-                        var dotEl2 = document.createElement('div');
-                        dotEl2.className = 'user-dot';
-                        userMarker = new maplibregl.Marker({ element: dotEl2, anchor: 'center' })
-                            .setLngLat([lon, lat]).addTo(map);
-                    }
-                },
-                function() {},
-                { enableHighAccuracy: true, maximumAge: 5000 }
-            );
+            var opts = { enableHighAccuracy: true, timeout: 10000, maximumAge: 5000 };
+            function onPos(p) {
+                var lat = p.coords.latitude, lon = p.coords.longitude;
+                if (!isValid(lat, lon)) return;
+                liveUserLocation = { lat: lat, lon: lon };
+                if (userMarker) userMarker.setLngLat([lon, lat]);
+            }
+            navigator.geolocation.getCurrentPosition(onPos, function(){}, opts);
+            navigator.geolocation.watchPosition(onPos, function(){}, opts);
         }
 
-        async function init() {
-            if (typeof turf === 'undefined') {
-                document.getElementById('statusText').textContent = "Turf.js yuklanmadi";
-                return;
-            }
-            if (!orderId) { document.getElementById('statusText').textContent = "Order ID topilmadi"; return; }
-            var r = await fetch(API_BASE + '/api/webapp/order/' + orderId + '?v=' + Date.now(), { headers: { 'ngrok-skip-browser-warning': 'true' } });
-            if (!r.ok) { document.getElementById('statusText').textContent = "Buyurtma topilmadi"; return; }
-            var order = await r.json();
-            userLocation = { lat: order.pickup_latitude, lon: order.pickup_longitude };
-            if (!isValid(userLocation.lat, userLocation.lon)) { document.getElementById('statusText').textContent = "Joylashuv noto'g'ri"; return; }
-            map = new maplibregl.Map({
-                container: 'map',
-                style: {
-                    version: 8,
-                    sources: {
-                        osm: {
-                            type: 'raster',
-                            tiles: [
-                                'https://a.tile.openstreetmap.org/{z}/{x}/{y}.png',
-                                'https://b.tile.openstreetmap.org/{z}/{x}/{y}.png',
-                                'https://c.tile.openstreetmap.org/{z}/{x}/{y}.png'
-                            ],
-                            tileSize: 256,
-                            maxzoom: 19
-                        }
-                    },
-                    layers: [{ id: 'osm-tiles', type: 'raster', source: 'osm' }]
-                },
-                center: [userLocation.lon, userLocation.lat],
-                zoom: 16,
-                pitch: 0,
-                bearing: 0,
-                antialias: true
-            });
-            var pickupEl = document.createElement('div');
-            pickupEl.style.cssText = 'width:32px;height:32px;background:#E53E3E;border-radius:50%;border:3px solid white;box-shadow:0 3px 12px rgba(0,0,0,0.5)';
-            pickupMarker = new maplibregl.Marker({ element: pickupEl, anchor: 'center' })
-                .setLngLat([userLocation.lon, userLocation.lat]).addTo(map);
-
-            var dotHtml = document.createElement('div');
-            dotHtml.className = 'user-dot';
-            userMarker = new maplibregl.Marker({ element: dotHtml, anchor: 'center' })
-                .setLngLat([userLocation.lon, userLocation.lat]).addTo(map);
-
-            var driverWrap = document.createElement('div');
-            driverMarkerInnerEl = document.createElement('div');
-            driverMarkerInnerEl.className = 'driver-marker-inner';
-            driverMarkerInnerEl.innerHTML = '🚕';
-            driverWrap.appendChild(driverMarkerInnerEl);
-            driverMarker = new maplibregl.Marker({ element: driverWrap, anchor: 'center' })
-                .setLngLat([userLocation.lon, userLocation.lat]).addTo(map);
-
-            startUserGeolocation();
-            if (navigator.geolocation) {
-                navigator.geolocation.getCurrentPosition(
-                    function(p) {
-                        if (!isValid(p.coords.latitude, p.coords.longitude)) return;
-                        liveUserLocation = { lat: p.coords.latitude, lon: p.coords.longitude };
-                        if (userMarker) userMarker.setLngLat([p.coords.longitude, p.coords.latitude]);
-                        map.easeTo({ center: [p.coords.longitude, p.coords.latitude], zoom: 15, duration: 800 });
-                    },
-                    function() {},
-                    { enableHighAccuracy: true, timeout: 8000 }
-                );
-            }
-            document.getElementById('btnRecenter').onclick = function() {
-                lastUserInteractMs = performance.now();
-                followDriver = true;
-                easeFollowToDriver();
-            };
-            map.on('load', function() {
-                ignoreInteractionUntilMs = performance.now() + 2800;
-                lastUserInteractMs = performance.now();
-                smoothMapPitch = map.getPitch();
-                smoothMapBearing = map.getBearing();
-                wireMapInteractionHandlers();
-                setInterval(function() {
-                    if (followDriver || displayLat == null || displayLon == null) return;
-                    if (performance.now() < ignoreInteractionUntilMs) return;
-                    if ((performance.now() - lastUserInteractMs) < IDLE_FOLLOW_MS) return;
-                    followDriver = true;
-                    easeFollowToDriver();
-                }, 700);
-                updateDriverLocation();
-                setInterval(updateDriverLocation, POLL_MS);
-                rafId = requestAnimationFrame(tickNavFrame);
-            });
-        }
-
+        /* ── Haydovchi joylashuvini so'rash (polling) ── */
         async function updateDriverLocation() {
             try {
-                var r = await fetch(API_BASE + '/api/webapp/order/' + orderId + '/driver-location?v=' + Date.now(), { headers: { 'ngrok-skip-browser-warning': 'true' } });
+                var r = await fetch(
+                    API_BASE + '/api/webapp/order/' + orderId + '/driver-location?v=' + Date.now(),
+                    { headers: { 'ngrok-skip-browser-warning': 'true' } }
+                );
                 var data = await r.json();
                 var carEl = document.getElementById('carInfo');
                 var etaEl = document.getElementById('eta');
                 if (data.driver) {
-                    document.getElementById('statusText').textContent = "Haydovchi yolda";
-                    if (carEl) carEl.textContent = (data.driver.name || 'Haydovchi') + ' · ' + (data.driver.car || '—');
+                    document.getElementById('statusText').textContent = 'Haydovchi yo\\'lda';
+                    if (carEl) carEl.textContent = (data.driver.name || 'Haydovchi') + ' \u00b7 ' + (data.driver.car || '\u2014');
                 }
-                var lat = data.latitude, lon = data.longitude;
-                if (lat != null && lon != null && isValid(lat, lon)) {
-                    driverLocation = { lat: lat, lon: lon };
-                    var forceRoute = !routeLineFeature || distanceFromRouteMeters(lat, lon) > OFF_ROUTE_M;
-                    if (userLocation) drawRouteBetween(userLocation, driverLocation, forceRoute);
-                    var rdp = resolveDriverDisplayPoint(lat, lon);
-                    beginLerpTo(rdp.lon, rdp.lat);
+                /* snapped_latitude/longitude mavjud bo'lsa — uni olamiz (haydovchi allaqachon snap qilgan) */
+                var lat = data.snapped_latitude != null ? data.snapped_latitude : data.latitude;
+                var lon = data.snapped_longitude != null ? data.snapped_longitude : data.longitude;
+                if (isValid(lat, lon)) {
+                    beginLerpTo(lon, lat);
                     var ref = liveUserLocation || userLocation;
-                    if (ref) {
-                        var d = turfDistanceKm(lat, lon, ref.lat, ref.lon);
-                        var min = Math.max(1, Math.round(d / AVG_KMH * 60));
-                        if (etaEl) etaEl.textContent = min + ' daqiqa';
+                    if (ref && etaEl) {
+                        var dKm = haversineKm(lat, lon, ref.lat, ref.lon);
+                        etaEl.textContent = Math.max(1, Math.round(dKm / AVG_KMH * 60)) + ' daqiqa';
                     }
                 }
-            } catch (e) {}
+            } catch (_) {}
         }
-        /* init() is called by the dynamic script loader above */
+
+        /* ── init ── */
+        async function init() {
+            if (!orderId) { document.getElementById('statusText').textContent = 'Order ID topilmadi'; return; }
+            try {
+                var r = await fetch(API_BASE + '/api/webapp/order/' + orderId + '?v=' + Date.now(),
+                    { headers: { 'ngrok-skip-browser-warning': 'true' } });
+                if (!r.ok) { document.getElementById('statusText').textContent = 'Buyurtma topilmadi'; return; }
+                var order = await r.json();
+                userLocation = { lat: order.pickup_latitude, lon: order.pickup_longitude };
+                if (!isValid(userLocation.lat, userLocation.lon)) { document.getElementById('statusText').textContent = 'Manzil noto\\'g\\'ri'; return; }
+            } catch (_) { document.getElementById('statusText').textContent = 'Xato: buyurtma olinmadi'; return; }
+
+            map = new maplibregl.Map({
+                container: 'map',
+                style: {
+                    version: 8,
+                    sources: { osm: { type: 'raster', tileSize: 256, maxzoom: 19,
+                        tiles: ['https://a.tile.openstreetmap.org/{z}/{x}/{y}.png',
+                                'https://b.tile.openstreetmap.org/{z}/{x}/{y}.png',
+                                'https://c.tile.openstreetmap.org/{z}/{x}/{y}.png'] } },
+                    layers: [{ id: 'osm', type: 'raster', source: 'osm' }]
+                },
+                center: [userLocation.lon, userLocation.lat],
+                zoom: 16, pitch: 0, bearing: 0, antialias: true
+            });
+
+            /* Pickup marker */
+            var pickEl = document.createElement('div');
+            pickEl.style.cssText = 'width:32px;height:32px;background:#E53E3E;border-radius:50%;border:3px solid white;box-shadow:0 3px 12px rgba(0,0,0,.5)';
+            pickupMarker = new maplibregl.Marker({ element: pickEl, anchor: 'center' })
+                .setLngLat([userLocation.lon, userLocation.lat]).addTo(map);
+
+            /* User dot */
+            var dotEl = document.createElement('div'); dotEl.className = 'user-dot';
+            userMarker = new maplibregl.Marker({ element: dotEl, anchor: 'center' })
+                .setLngLat([userLocation.lon, userLocation.lat]).addTo(map);
+
+            /* Driver marker */
+            var dWrap = document.createElement('div');
+            driverMarkerInnerEl = document.createElement('div');
+            driverMarkerInnerEl.className = 'driver-marker-inner';
+            driverMarkerInnerEl.innerHTML = '🚕';
+            dWrap.appendChild(driverMarkerInnerEl);
+            driverMarker = new maplibregl.Marker({ element: dWrap, anchor: 'center' })
+                .setLngLat([userLocation.lon, userLocation.lat]).addTo(map);
+
+            startUserGeolocation();
+
+            document.getElementById('btnRecenter').onclick = function() {
+                followDriver = true; lastUserInteractMs = performance.now();
+                easeFollowToDriver();
+            };
+
+            map.on('load', function() {
+                ignoreInteractionUntilMs = performance.now() + 2500;
+                lastUserInteractMs = performance.now();
+                smoothMapPitch = map.getPitch(); smoothMapBearing = map.getBearing();
+                wireInteractionHandlers();
+                updateDriverLocation();
+                setInterval(updateDriverLocation, POLL_MS);
+                rafId = requestAnimationFrame(tickNavFrame);
+            });
+
+            try { var tg = window.Telegram && window.Telegram.WebApp; if (tg) { tg.ready(); tg.expand(); } } catch (_) {}
+        }
     </script>
 </body>
 </html>
@@ -2337,6 +2096,9 @@ async def lifespan(app: FastAPI) -> AsyncGenerator:
             await session.execute(text("ALTER TABLE orders ADD COLUMN IF NOT EXISTS completed_at TIMESTAMP;"))
             await session.execute(text("ALTER TABLE orders ADD COLUMN IF NOT EXISTS cancelled_at TIMESTAMP;"))
             await session.execute(text("ALTER TABLE orders ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP;"))
+            # Haydovchi tomonidan yuborilgan snapped koordinatalar (yo'lga yopishtirilgan)
+            await session.execute(text("ALTER TABLE orders ADD COLUMN IF NOT EXISTS snapped_lat DOUBLE PRECISION;"))
+            await session.execute(text("ALTER TABLE orders ADD COLUMN IF NOT EXISTS snapped_lon DOUBLE PRECISION;"))
             try:
                 await session.execute(text("ALTER TABLE orders ALTER COLUMN updated_at SET DEFAULT CURRENT_TIMESTAMP;"))
             except Exception:

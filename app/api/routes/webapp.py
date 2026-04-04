@@ -483,6 +483,8 @@ class UpdateDriverLocationBody(BaseModel):
     driver_id: int
     latitude: float
     longitude: float
+    snapped_latitude: Optional[float] = None   # Haydovchi tomonidan hisoblangan snap nuqta
+    snapped_longitude: Optional[float] = None  # Haydovchi tomonidan hisoblangan snap nuqta
     heading: Optional[float] = None
     order_id: Optional[int] = None
 
@@ -518,8 +520,11 @@ async def update_driver_location_api(
             raise HTTPException(status_code=403, detail="Token driver_id mismatch")
 
     redis = get_redis()
+    # Snapped koordinata mavjud bo'lsa — uni saqlash, aks holda raw GPS
+    store_lat = body.snapped_latitude if body.snapped_latitude is not None else body.latitude
+    store_lon = body.snapped_longitude if body.snapped_longitude is not None else body.longitude
     if redis is not None:
-        ok = set_driver_location(redis, body.driver_id, body.latitude, body.longitude, body.heading)
+        ok = set_driver_location(redis, body.driver_id, store_lat, store_lon, body.heading)
         if not ok:
             logger.warning("Redis driver location write failed (continuing with DB update)")
 
@@ -543,12 +548,26 @@ async def update_driver_location_api(
                 """),
                 {
                     "driver_id": body.driver_id,
-                    "lat": body.latitude,
-                    "lon": body.longitude,
+                    "lat": store_lat,
+                    "lon": store_lon,
                 },
             )
+            # Snapped koordinata orders jadvaliga ham yoziladi (mijoz sahifasi uchun)
+            if body.order_id is not None and body.snapped_latitude is not None:
+                await db.execute(
+                    text("""
+                        UPDATE orders
+                        SET snapped_lat = :slat, snapped_lon = :slon
+                        WHERE id = :order_id
+                    """),
+                    {
+                        "slat": body.snapped_latitude,
+                        "slon": body.snapped_longitude,
+                        "order_id": body.order_id,
+                    }
+                )
         # Taksometr: in_progress buyurtmada har nuqta (throttle dan mustaqil) masofaga qo'shiladi
-        await accumulate_order_distance_for_driver(db, body.driver_id, body.latitude, body.longitude)
+        await accumulate_order_distance_for_driver(db, body.driver_id, store_lat, store_lon)
         await db.commit()
     except Exception as ex:
         # Redis ishlasa ham, DB throttle yangilashda xato bo‘lsa matching vaqtincha ishlamasligi mumkin.
@@ -566,7 +585,7 @@ async def update_driver_location_api(
         return {"ok": True}
 
     from app.utils.distance import haversine_distance
-    dist_km = haversine_distance(body.latitude, body.longitude, float(pickup_lat), float(pickup_lon))
+    dist_km = haversine_distance(store_lat, store_lon, float(pickup_lat), float(pickup_lon))
     if dist_km >= 0.05:
         return {"ok": True}
 
@@ -598,7 +617,7 @@ async def get_driver_location(order_id: int, db: AsyncSession = Depends(get_db))
             return {"driver": None, "latitude": None, "longitude": None}
         user = await UserCRUD.get_by_id(db, driver.user_id) if driver.user_id else None
 
-        # Redis'dan birinchi o'qish
+        # Redis'dan birinchi o'qish (snapped koordinata saqlangan bo'ladi)
         redis = get_redis()
         cached = get_driver_location_redis(redis, order.driver_id) if redis else None
         if cached:
@@ -606,6 +625,9 @@ async def get_driver_location(order_id: int, db: AsyncSession = Depends(get_db))
         else:
             lat = getattr(driver, "current_latitude", None)
             lon = getattr(driver, "current_longitude", None)
+        # orders jadvalidan snapped koordinatani olish
+        snapped_lat = getattr(order, "snapped_lat", None)
+        snapped_lon = getattr(order, "snapped_lon", None)
         car = getattr(driver, "car_model", "") or ""
         if getattr(driver, "car_number", None):
             car = (car + " " + str(driver.car_number)).strip()
@@ -613,6 +635,8 @@ async def get_driver_location(order_id: int, db: AsyncSession = Depends(get_db))
             "driver": {"name": getattr(user, "first_name", None) or "Haydovchi", "car": car or "—"},
             "latitude": float(lat) if lat is not None else None,
             "longitude": float(lon) if lon is not None else None,
+            "snapped_latitude": float(snapped_lat) if snapped_lat is not None else None,
+            "snapped_longitude": float(snapped_lon) if snapped_lon is not None else None,
         }
     except Exception as e:
         logger.error(f"Driver location xato: {e}")
