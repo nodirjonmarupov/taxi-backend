@@ -1701,9 +1701,9 @@ USER_TRACKING_HTML = """
     <meta http-equiv="Pragma" content="no-cache" />
     <meta http-equiv="Expires" content="0" />
     <title>Taksi yetib kelmoqda</title>
-    <script src="https://telegram.org/js/telegram-web-app.js?v=4.0.0"></script>
-    <script src="https://unpkg.com/@turf/turf@6/turf.min.js?v=4.0.0"></script>
-    <link href="https://cdn.jsdelivr.net/npm/maplibre-gl@3.6.2/dist/maplibre-gl.css?v=4.0.0" rel="stylesheet"/>
+    <script src="https://telegram.org/js/telegram-web-app.js?v=8.0.0"></script>
+    <script src="https://unpkg.com/@turf/turf@6/turf.min.js?v=8.0.0"></script>
+    <link href="https://cdn.jsdelivr.net/npm/maplibre-gl@3.6.2/dist/maplibre-gl.css?v=8.0.0" rel="stylesheet"/>
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
         body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #0a0a0a; color: #fff; }
@@ -1754,7 +1754,7 @@ USER_TRACKING_HTML = """
         <div class="eta" id="eta">— daqiqa</div>
     </div>
     <button class="btn-recenter" id="btnRecenter">Mening joyim</button>
-    <script src="https://cdn.jsdelivr.net/npm/maplibre-gl@3.6.2/dist/maplibre-gl.js?v=4.0.0"></script>
+    <script src="https://cdn.jsdelivr.net/npm/maplibre-gl@3.6.2/dist/maplibre-gl.js?v=8.0.0"></script>
     <script>
         var tg = (window.Telegram && window.Telegram.WebApp) ? window.Telegram.WebApp : { expand: function(){} };
         try { tg.expand(); } catch (_) {}
@@ -1767,7 +1767,6 @@ USER_TRACKING_HTML = """
         var driverLocation = null;
         var AVG_KMH = 40;
         var OFF_ROUTE_M = 40;
-        var SNAP_MAX_M = 100;
         var NAV_3D_DISTANCE_KM = 0.5;
         var POLL_MS = 5000;
         var LERP_MS = 5000;
@@ -1792,8 +1791,8 @@ USER_TRACKING_HTML = """
         var lastRouteTrimTs = 0;
         var ROUTE_TRIM_MIN_MS = 120;
         var NAV_PITCH_DEG = 55;
-        var _snapConsoleKey = '';
-        var _snapConsoleTs = 0;
+        var _snapLogTs = 0;
+        var _snapLogKey = '';
 
         function isValid(lat, lon) {
             return lat != null && lon != null && !isNaN(lat) && !isNaN(lon) && lat >= -90 && lat <= 90 && lon >= -180 && lon <= 180;
@@ -1844,54 +1843,68 @@ USER_TRACKING_HTML = """
             };
         }
 
-        /** Marshrutdan SNAP_MAX_M ichida bo'lsa — nearestPointOnLine; aks holda GPS (erkin) */
+        /**
+         * KakaoNavi Hard Lock:
+         *  - Marshrut mavjud bo'lsa — DOIM nearestPointOnLine ga yopish (mesofadan qat'i nazar)
+         *  - Faqat marshrut yo'q bo'lsa GPS dan foydalan
+         */
         function resolveDriverDisplayPoint(lat, lon) {
+            var now = performance.now();
             // #region agent log
-            function _snapDbg(msg, data) {
-                fetch('http://127.0.0.1:7602/ingest/b6487788-bee6-445f-81f9-95a1b43ce854', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Debug-Session-Id': '7969f2' }, body: JSON.stringify({ sessionId: '7969f2', location: 'USER_TRACKING:resolveDriverDisplayPoint', message: msg, data: data || {}, timestamp: Date.now(), hypothesisId: 'H1-snap' }) }).catch(function () {});
+            function _snapDbg(msg, dM) {
+                fetch('http://127.0.0.1:7602/ingest/b6487788-bee6-445f-81f9-95a1b43ce854', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json', 'X-Debug-Session-Id': '7969f2' },
+                    body: JSON.stringify({ sessionId: '7969f2', location: 'main.py:resolveDriverDisplayPoint', message: msg, data: { dM: dM }, timestamp: Date.now(), hypothesisId: 'H1-hardsnap' })
+                }).catch(function () {});
             }
             // #endregion
-            function snapConsole(label) {
-                var now = performance.now();
-                if (label !== _snapConsoleKey || (now - _snapConsoleTs) > 1200) {
-                    _snapConsoleKey = label;
-                    _snapConsoleTs = now;
-                    console.log(label);
+            function throttleLog(label, dM) {
+                if (label !== _snapLogKey || (now - _snapLogTs) > 1500) {
+                    _snapLogKey = label; _snapLogTs = now;
+                    console.log(label + (dM != null ? ' | GPS-route: ' + Math.round(dM) + 'm' : ''));
                 }
             }
             if (!routeLineFeature || !routeCoordsLngLat || routeCoordsLngLat.length < 2) {
-                snapConsole('SNAP: Off Route (GPS)');
-                _snapDbg('no_route', {});
+                throttleLog('SNAP: Off Route (GPS) — no route yet', null);
+                _snapDbg('no_route', null);
                 return { lon: lon, lat: lat, segIndex: null, snapped: false };
             }
-            var d = distanceFromRouteMeters(lat, lon);
-            if (d > SNAP_MAX_M) {
-                snapConsole('SNAP: Off Route (GPS)');
-                _snapDbg('beyond_snap_max', { dM: Math.round(d), maxM: SNAP_MAX_M });
-                return { lon: lon, lat: lat, segIndex: null, snapped: false };
-            }
+            // HARD LOCK: nearestPointOnLine — mesofadan qat'i nazar
             var s = snapToRouteLineForced(lat, lon);
             if (!s) {
-                snapConsole('SNAP: Off Route (GPS)');
-                _snapDbg('nearest_failed', { dM: Math.round(d) });
+                var dFallback = distanceFromRouteMeters(lat, lon);
+                throttleLog('SNAP: Off Route (GPS) — nearestPointOnLine failed', dFallback);
+                _snapDbg('nearest_failed', dFallback);
                 return { lon: lon, lat: lat, segIndex: null, snapped: false };
             }
-            snapConsole('SNAP: On Route');
-            _snapDbg('snapped', { dM: Math.round(d) });
+            var dSnap = distanceFromRouteMeters(lat, lon);
+            throttleLog('SNAP: On Route', dSnap);
+            _snapDbg('snapped', dSnap);
             return { lon: s.lon, lat: s.lat, segIndex: s.segIndex, snapped: true };
         }
 
-        /** Yo'l segmenti bo'ylab mijoz (coords[0]) tomonga harakat yo'nalishi — Turf bearing */
+        /**
+         * Marshrut segmenti bo'ylab harakatlanish yo'nalishi.
+         * coords[0] = pickup (manzil), haydovchi coords[last] → coords[0] tomon harakatlanadi.
+         * segIndex = nearestPointOnLine.properties.index (segment boshlang'ich vertex).
+         * Segment: coords[segIndex] → coords[segIndex+1].
+         * Harakatlanish yo'nalishi: coords[0] ga yaqin tomonga, ya'ni dA < dB bo'lsa b→a.
+         */
         function bearingFromRouteSegment(segIndex) {
             var coords = routeCoordsLngLat;
-            if (!coords || coords.length < 2 || segIndex < 0 || segIndex >= coords.length - 1) return smoothBearing;
-            var a = coords[segIndex];
-            var b = coords[segIndex + 1];
-            var userPt = turf.point(coords[0]);
-            var dA = turf.distance(turf.point(a), userPt, { units: 'kilometers' });
-            var dB = turf.distance(turf.point(b), userPt, { units: 'kilometers' });
-            if (dA <= dB) return turf.bearing(turf.point(b), turf.point(a));
-            return turf.bearing(turf.point(a), turf.point(b));
+            if (!coords || coords.length < 2) return smoothBearing;
+            var idx = Math.max(0, Math.min(segIndex, coords.length - 2));
+            var a = coords[idx];
+            var b = coords[idx + 1];
+            // pickup (destination) = coords[0]; driver moves toward it
+            var dest = turf.point(coords[0]);
+            var dA = turf.distance(turf.point(a), dest, { units: 'kilometers' });
+            var dB = turf.distance(turf.point(b), dest, { units: 'kilometers' });
+            // a yaqin => harakatlanish b→a; b yaqin => a→b
+            return dA <= dB
+                ? turf.bearing(turf.point(b), turf.point(a))
+                : turf.bearing(turf.point(a), turf.point(b));
         }
 
         function distanceFromRouteMeters(lat, lon) {
@@ -1901,18 +1914,26 @@ USER_TRACKING_HTML = """
             } catch (e) { return 9999; }
         }
 
+        /**
+         * Progressive Route (KakaoNavi): haydovchi o'tib ketgan yo'lni o'chirib,
+         * faqat haydovchidan pickup (coords[0]) gacha qolgan sariq chiziqni ko'rsat.
+         * coords[0] = pickup; haydovchi coords[last] → coords[0] tomon keladi.
+         * Remaining = lineSlice(driverSnapped, pickupPt) = driver dan pickup ga.
+         */
         function trimRouteToRemaining(displayLon, displayLat) {
             if (!routeLineFeature || !routeCoordsLngLat || routeCoordsLngLat.length < 2) return routeCoordsLngLat.slice();
             try {
-                var userPt = turf.point(routeCoordsLngLat[0]);
                 var drvPt = turf.point([displayLon, displayLat]);
                 var snapped = turf.nearestPointOnLine(routeLineFeature, drvPt, { units: 'kilometers' });
                 if (!snapped || !snapped.geometry) return routeCoordsLngLat.slice();
-                var slice = turf.lineSlice(userPt, snapped, routeLineFeature);
-                if (slice && slice.geometry && slice.geometry.coordinates && slice.geometry.coordinates.length >= 2) {
-                    return slice.geometry.coordinates;
+                // pickupPt = coords[0] — manzil, shu tomonga haydovchi harakatlanadi
+                var pickupPt = turf.point(routeCoordsLngLat[0]);
+                // Haydovchidan pickup gacha qolgan yo'l (progressive trim)
+                var remaining = turf.lineSlice(snapped, pickupPt, routeLineFeature);
+                if (remaining && remaining.geometry && remaining.geometry.coordinates && remaining.geometry.coordinates.length >= 2) {
+                    return remaining.geometry.coordinates;
                 }
-            } catch (e) { /* fallback */ }
+            } catch (e) { /* fallback: butun yo'lni ko'rsat */ }
             return routeCoordsLngLat.slice();
         }
 
@@ -2033,15 +2054,18 @@ USER_TRACKING_HTML = """
                 var t = Math.min(1, Math.max(0, easeOutCubic(rawT)));
                 displayLat = lerp(lerpFromLat, lerpToLat, t);
                 displayLon = lerp(lerpFromLon, lerpToLon, t);
+                // Hard lock: lerp oraliq nuqtasini ham yo'l ustiga yopish
                 var rdp = resolveDriverDisplayPoint(displayLat, displayLon);
                 displayLat = rdp.lat;
                 displayLon = rdp.lon;
                 if (rdp.snapped && rdp.segIndex != null) {
+                    // Marshrut segmentining yo'nalishi — marker yo'lga qarab tursin
                     routeSegmentBearing = bearingFromRouteSegment(rdp.segIndex);
                     targetBearing = routeSegmentBearing;
                 } else if (prevDispLat != null && prevDispLon != null) {
+                    // GPS rejimida: harakat yo'nalishi
                     var movedKm = turfDistanceKm(prevDispLat, prevDispLon, displayLat, displayLon);
-                    if (movedKm > 0.00002) {
+                    if (movedKm > 0.00003) {
                         targetBearing = turfBearingDeg(prevDispLat, prevDispLon, displayLat, displayLon);
                     }
                 }
