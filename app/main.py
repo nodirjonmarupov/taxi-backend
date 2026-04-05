@@ -357,9 +357,11 @@ HTML_CONTENT = """
         let pLat = null, pLng = null, locked = true, lastCam = 0;
         let simIdx = 0, simOn = false, simTmr = null, turnI = 0, distKm = 1;
         let displayBearing = 0, targetBearing = 0;
+        let displayHeading = 0; // Arrow uchun alohida smoothed heading (camera bearing dan mustaqil)
         let headingBuffer = [];
         const SPEED_THRESHOLD_KMH = 5;
         const HEADING_CHANGE_THRESHOLD = 8;
+        const HEADING_CLEAR_THRESHOLD = 3; // Hysteresis: buffer faqat bu dan past tezlikda tozalanadi (SPEED_THRESHOLD dan past bo'lishi shart)
         let northUpMode = false;
         let isManualMode = false, gestureStartAngle = null, gestureStartBearing = 0, manualBearing = 0, manualModeTimer = null, useManualBearing = false;
         let renderLoopRunning = false;
@@ -544,6 +546,20 @@ HTML_CONTENT = """
         }
         function speedToZoom(s) { return s > 70 ? 15 : s > 40 ? 15.5 : s > 20 ? 16.5 : 17.5; }
         function getZoomBySpeed(speedKmh) { return speedToZoom(speedKmh); }
+        // Marshrutning snapped nuqtasidagi yo'nalishini hisoblaydi (GPS heading yo'q yoki ishonchsiz bo'lganda)
+        function getRouteTangentBearing(snappedLon, snappedLat) {
+            if (!_driverRouteLine || !_driverRouteCoords || _driverRouteCoords.length < 2) return null;
+            try {
+                var pt = turf.point([snappedLon, snappedLat]);
+                var snapped = turf.nearestPointOnLine(_driverRouteLine, pt, { units: 'kilometers' });
+                var idx = snapped && snapped.properties ? (snapped.properties.index || 0) : 0;
+                idx = Math.min(idx, _driverRouteCoords.length - 2);
+                var p1 = _driverRouteCoords[idx];
+                var p2 = _driverRouteCoords[idx + 1];
+                if (p1 && p2) return calcBearing(p1[1], p1[0], p2[1], p2[0]);
+            } catch (_) {}
+            return null;
+        }
         function snapToRoute(lat, lng) {
             var coords = routeCoordinates;
             if (!coords || coords.length < 2) return [lat, lng];
@@ -590,7 +606,7 @@ HTML_CONTENT = """
             driverMarker = new maplibregl.Marker({
                 element: wrap,
                 anchor: 'center',
-                rotationAlignment: 'map',
+                rotationAlignment: 'viewport', // viewport: MapLibre elementga o'z rotation qo'shmaydi — CSS bilan to'liq nazorat
                 pitchAlignment: 'viewport'
             }).setLngLat([lon, lat]).addTo(map);
         }
@@ -643,30 +659,36 @@ HTML_CONTENT = """
                 var dt = lt ? Math.min((t - lt) / 1000, 0.1) : 0.016;
                 renderLoop.lt = t;
 
-                // Smooth position interpolation
+                // PATCH: Position lerp — k=1.5 → ~0.3s da target ga yetadi (k=7 juda tez edi, GPS noise o'tib ketardi)
                 if (tLat != null && tLng != null && dLat != null && dLng != null) {
-                    var posAlpha = 1 - Math.pow(0.001, dt * 7);
+                    var posAlpha = 1 - Math.pow(0.001, dt * 1.5);
                     dLat = lerp(dLat, tLat, posAlpha);
                     dLng = lerp(dLng, tLng, posAlpha);
                 }
 
-                // Smooth bearing
+                // PATCH: Camera bearing smooth (map rotation)
                 if (!useManualBearing) targetBearing = northUpMode ? 0 : brg;
                 var rotAlpha = 1 - Math.pow(0.001, dt * 1.8);
                 displayBearing = lerpAngle(displayBearing, targetBearing, rotAlpha);
 
-                // Rotate driver arrow (counter-rotate so it always points up)
-                if (arrowEl) arrowEl.style.transform = 'rotate(' + displayBearing + 'deg)';
+                // PATCH: Arrow heading — rotationAlignment:'viewport' → MapLibre hech narsa qo'shmaydi.
+                // Screen angle = displayHeading - displayBearing
+                //   heading-up rejim: displayHeading ≈ displayBearing → 0° (screen-up, forward) ✓
+                //   north-up rejim: displayHeading=90, displayBearing=0 → 90° (screen-right, east) ✓
+                //   manual rotation: displayBearing o'zgaradi, displayHeading qoladi → to'g'ri ✓
+                var headAlpha = 1 - Math.pow(0.001, dt * 4);
+                displayHeading = lerpAngle(displayHeading, brg, headAlpha);
+                if (arrowEl) arrowEl.style.transform = 'rotate(' + ((displayHeading - displayBearing + 720) % 360) + 'deg)';
 
                 // Update driver marker position
                 if (driverMarker && dLat != null && dLng != null) {
                     driverMarker.setLngLat([dLng, dLat]);
                 }
 
-                // Camera follow with MapLibre native bearing + pitch
+                // Camera follow — locked rejimda driver ni markaz ushlab turadi
                 if (locked && dLat != null && dLng != null) {
                     var now = Date.now();
-                    if (now - lastCam > 150) {
+                    if (now - lastCam > 160) {
                         lastCam = now;
                         var zoom = speedToZoom(spd);
                         var H = window.innerHeight;
@@ -681,7 +703,7 @@ HTML_CONTENT = """
                                 left: 0,
                                 right: 0
                             },
-                            duration: 250,
+                            duration: 200,
                             easing: function(t) { return t < 0.5 ? 2*t*t : -1+(4-2*t)*t; }
                         });
                     }
@@ -1127,7 +1149,6 @@ HTML_CONTENT = """
                     var lng = position.coords.longitude;
                     var sp = position.coords.speed;
                     if (sp != null && !isNaN(sp)) lastGpsSpeedKmh = sp * 3.6;
-                    lastDriverLocation = { lat: lat, lon: lng };
                     var h = 0;
                     if (ORDER_DATA && ORDER_DATA.pickup_latitude != null) {
                         h = calcBearing(lat, lng, ORDER_DATA.pickup_latitude, ORDER_DATA.pickup_longitude);
@@ -1217,6 +1238,8 @@ HTML_CONTENT = """
             try {
                 if (!map || !ORDER_DATA) return;
                 if (!isValidCoord(lat, lng)) return;
+                // Haqiqiy GPS heading ni saqlab qo'yamiz (null bo'lsa bufferga kirmasin)
+                var _trueGpsHeading = (heading != null && !isNaN(heading)) ? heading : null;
                 if (heading == null || isNaN(heading)) heading = lastHeading;
                 lastHeading = heading;
                 // Yo'lga snapping: Turf mavjud bo'lsa aniq geodezik, aks holda sodda geometriya
@@ -1239,13 +1262,23 @@ HTML_CONTENT = """
                     var _fb2 = snapToRoute(lat, lng);
                     sl = _fb2[0]; sa = _fb2[1];
                 }
+                // Adaptive dead zone: tezlikka qarab (2m..7m) GPS noise filtri
+                var prevTLat = tLat, prevTLng = tLng;
+                if (prevTLat != null && prevTLng != null) {
+                    var snapMoveDist = haversineM(sl, sa, prevTLat, prevTLng);
+                    var _dzThresh = Math.max(2.0, Math.min(spd * 0.15, 7.0));
+                    if (snapMoveDist < _dzThresh) {
+                        sl = prevTLat;
+                        sa = prevTLng;
+                    }
+                }
                 var driverPos = { lat: sl, lng: sa };
                 var now = Date.now();
                 var speedKmh = 0;
                 if (lastDriverLocation && lastPositionTime) {
-                    var distM = haversineM(driverPos.lat, driverPos.lng, lastDriverLocation.lat, lastDriverLocation.lon);
+                    var distM = haversineM(lat, lng, lastDriverLocation.lat, lastDriverLocation.lon);
                     var dtSec = (now - lastPositionTime) / 1000;
-                    if (dtSec > 0) speedKmh = (distM / 1000) / dtSec * 3600;
+                    if (dtSec > 0.1) speedKmh = (distM / 1000) / dtSec * 3600;
                 }
                 if (lastGpsSpeedKmh != null && !isNaN(lastGpsSpeedKmh) && lastGpsSpeedKmh > 0) speedKmh = lastGpsSpeedKmh;
                 lastPositionTime = now;
@@ -1257,16 +1290,40 @@ HTML_CONTENT = """
                 spd = speedKmh;
                 // Progressive route trim (sariq chiziqning o'tib ketgan qismini o'chirib borish)
                 updateProgressiveRoute(sa, sl); // (lon, lat) tartibida
-                if (heading != null && !isNaN(heading)) {
-                    headingBuffer.push(heading);
+                // Heading pipeline: GPS buffer + route tangent fallback
+                // Hysteresis: buffer faqat HEADING_CLEAR_THRESHOLD (3 km/h) dan past bo'lganda tozalanadi.
+                // SPEED_THRESHOLD_KMH (5 km/h) atrofidagi tebranish bufferga ta'sir qilmaydi.
+                if (speedKmh < HEADING_CLEAR_THRESHOLD) {
+                    headingBuffer = [];
+                }
+                // Faqat haqiqiy GPS heading bufferga qo'shiladi (fallback 0° qiymati kirmasin)
+                if (_trueGpsHeading !== null) {
+                    headingBuffer.push(_trueGpsHeading);
                     if (headingBuffer.length > 5) headingBuffer.shift();
-                    var smoothHeading = circularMeanHeadings(headingBuffer);
-                    if (speedKmh > SPEED_THRESHOLD_KMH) {
-                        var diff = Math.abs(((smoothHeading - targetBearing + 540) % 360) - 180);
-                        if (diff >= HEADING_CHANGE_THRESHOLD) brg = smoothHeading;
-                    }
+                }
+                var smoothHeading = headingBuffer.length > 0 ? circularMeanHeadings(headingBuffer) : null;
+                var tangentBrg = (typeof turf !== 'undefined' && _driverRouteLine)
+                    ? getRouteTangentBearing(sa, sl) : null;
+                // Past tezlikda kichik burilishlar (3-5°) ham o'tkazib yuborilmasligi uchun adaptive threshold
+                var _hThresh = speedKmh > SPEED_THRESHOLD_KMH ? HEADING_CHANGE_THRESHOLD : 4;
+                if (speedKmh > SPEED_THRESHOLD_KMH) {
+                    var candidateBrg = (smoothHeading != null) ? smoothHeading
+                        : (tangentBrg != null ? tangentBrg : brg);
+                    var diff = Math.abs(((candidateBrg - brg + 540) % 360) - 180);
+                    if (diff >= _hThresh) brg = candidateBrg;
+                } else if (tangentBrg != null) {
+                    var diff2 = Math.abs(((tangentBrg - brg + 540) % 360) - 180);
+                    if (diff2 >= _hThresh) brg = tangentBrg;
                 }
                 if (!driverMarker) {
+                    // Birinchi frame uchun: speedKmh = 0 bo'lsa ham brg + barcha bearing state ni to'g'ri init qilish
+                    // Ustuvorlik: marshrut tangenti > GPS heading > mavjud brg
+                    var _initBrg = tangentBrg !== null ? tangentBrg
+                        : (smoothHeading !== null ? smoothHeading : brg);
+                    brg = _initBrg;
+                    displayHeading = _initBrg;
+                    displayBearing = _initBrg;
+                    targetBearing = _initBrg;
                     addDriverMarker(sl, sa);
                     dLat = sl;
                     dLng = sa;
