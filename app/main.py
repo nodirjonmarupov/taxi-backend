@@ -357,11 +357,15 @@ HTML_CONTENT = """
         let pLat = null, pLng = null, locked = true, lastCam = 0;
         let simIdx = 0, simOn = false, simTmr = null, turnI = 0, distKm = 1;
         let displayBearing = 0, targetBearing = 0;
-        let displayHeading = 0; // Arrow uchun alohida smoothed heading (camera bearing dan mustaqil)
-        let headingBuffer = [];
-        const SPEED_THRESHOLD_KMH = 5;
-        const HEADING_CHANGE_THRESHOLD = 8;
-        const HEADING_CLEAR_THRESHOLD = 3; // Hysteresis: buffer faqat bu dan past tezlikda tozalanadi (SPEED_THRESHOLD dan past bo'lishi shart)
+        let displayHeading = 0;
+        let _camBlockUntil = 0;
+        let _lastCamLat = null, _lastCamLng = null, _lastCamBrg = 0, _lastCamZoom = 0;
+        let _velLat = 0, _velLng = 0;
+        let _smoothVelLat = 0, _smoothVelLng = 0;
+        let _gpsAnchorLat = null, _gpsAnchorLng = null, _gpsAnchorMs = 0;
+        let _predLat = null, _predLng = null;
+        let _camLat = null, _camLng = null;
+        let _routeAnchorIdx = 0;
         let northUpMode = false;
         let isManualMode = false, gestureStartAngle = null, gestureStartBearing = 0, manualBearing = 0, manualModeTimer = null, useManualBearing = false;
         let renderLoopRunning = false;
@@ -560,6 +564,35 @@ HTML_CONTENT = """
             } catch (_) {}
             return null;
         }
+        // Route-based dead reckoning: walks distM meters along _driverRouteCoords starting
+        // from (ancLat, ancLng) which lies within segment startIdx.
+        // Stays on road geometry through curves — superior to linear extrapolation.
+        // O(k) where k = segments crossed (typically 1-3 for a 2s prediction window).
+        function advanceAlongRoute(ancLat, ancLng, startIdx, distM) {
+            if (!_driverRouteCoords || _driverRouteCoords.length < 2 || distM <= 0) return null;
+            var idx = Math.max(0, Math.min(startIdx, _driverRouteCoords.length - 2));
+            var rem = distM;
+            // First: walk from anchor to the end of its segment.
+            var c1End = _driverRouteCoords[idx + 1];
+            var distToSegEnd = haversineM(ancLat, ancLng, c1End[1], c1End[0]);
+            if (rem <= distToSegEnd) {
+                var f = distToSegEnd > 0 ? rem / distToSegEnd : 0;
+                return [ancLat + (c1End[1] - ancLat) * f, ancLng + (c1End[0] - ancLng) * f];
+            }
+            rem -= distToSegEnd;
+            // Then walk full segments until rem is exhausted.
+            for (var i = idx + 1; i < _driverRouteCoords.length - 1; i++) {
+                var cp1 = _driverRouteCoords[i], cp2 = _driverRouteCoords[i + 1];
+                var seg = haversineM(cp1[1], cp1[0], cp2[1], cp2[0]);
+                if (rem <= seg) {
+                    var f = seg > 0 ? rem / seg : 0;
+                    return [cp1[1] + (cp2[1] - cp1[1]) * f, cp1[0] + (cp2[0] - cp1[0]) * f];
+                }
+                rem -= seg;
+            }
+            var last = _driverRouteCoords[_driverRouteCoords.length - 1];
+            return [last[1], last[0]];
+        }
         function snapToRoute(lat, lng) {
             var coords = routeCoordinates;
             if (!coords || coords.length < 2) return [lat, lng];
@@ -591,8 +624,6 @@ HTML_CONTENT = """
             if (driverMarker) return;
             var wrap = document.createElement('div');
             wrap.className = 'dm-wrap';
-            var ring = document.createElement('div');
-            ring.className = 'dm-ring';
             var circle = document.createElement('div');
             circle.className = 'dm-circle';
             var svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
@@ -601,7 +632,6 @@ HTML_CONTENT = """
             svg.innerHTML = '<path d="M12 2L4.5 20.29l.71.71L12 18l6.79 3 .71-.71z"/>';
             arrowEl = svg;
             circle.appendChild(svg);
-            wrap.appendChild(ring);
             wrap.appendChild(circle);
             driverMarker = new maplibregl.Marker({
                 element: wrap,
@@ -613,41 +643,43 @@ HTML_CONTENT = """
         function followCam() {
             if (!locked || !map || dLat == null || dLng == null) return;
             var zoom = speedToZoom(spd);
-            var H = window.innerHeight;
+            var pitch = 60;
+            var mpp = 156543 * Math.cos(dLat * Math.PI / 180) / Math.pow(2, zoom);
+            var fwd = window.innerHeight * 0.15 * mpp / Math.cos(pitch * Math.PI / 180);
+            var cc = getOffsetCenter(dLat, dLng, displayBearing, fwd);
             map.easeTo({
-                center: [dLng, dLat],
+                center: [cc[1], cc[0]],
                 bearing: displayBearing,
-                pitch: 60,
+                pitch: pitch,
                 zoom: zoom,
-                padding: {
-                    top: 80,
-                    bottom: Math.round(H * 0.45),
-                    left: 0,
-                    right: 0
-                },
-                duration: 250,
-                easing: function(t) { return t < 0.5 ? 2*t*t : -1+(4-2*t)*t; }
+                duration: 500,
+                easing: function(x) { return x < 0.5 ? 2*x*x : 1 - Math.pow(-2*x+2,2)/2; }
             });
         }
         function recenter() {
             locked = true;
+            _camBlockUntil = Date.now() + 380;
             if (dLat != null && dLng != null && map) {
-                var H = window.innerHeight;
+                var zoom = speedToZoom(spd);
+                var pitch = 60;
+                var mpp = 156543 * Math.cos(dLat * Math.PI / 180) / Math.pow(2, zoom);
+                var fwd = window.innerHeight * 0.15 * mpp / Math.cos(pitch * Math.PI / 180);
+                var cc = getOffsetCenter(dLat, dLng, displayBearing, fwd);
                 map.easeTo({
-                    center: [dLng, dLat],
+                    center: [cc[1], cc[0]],
                     bearing: displayBearing,
-                    pitch: 55,
-                    zoom: speedToZoom(spd),
-                    padding: { top: 0, bottom: Math.round(H * 0.30), left: 0, right: 0 },
-                    duration: 300
+                    pitch: pitch,
+                    zoom: zoom,
+                    duration: 350,
+                    easing: function(x) { return x < 0.5 ? 2*x*x : 1 - Math.pow(-2*x+2,2)/2; }
                 });
             } else if (lastDriverLocation && map) {
                 map.easeTo({
                     center: [lastDriverLocation.lon, lastDriverLocation.lat],
                     zoom: map.getZoom() || 17,
                     bearing: displayBearing,
-                    pitch: 55,
-                    duration: 300
+                    pitch: 60,
+                    duration: 350
                 });
             }
         }
@@ -659,53 +691,109 @@ HTML_CONTENT = """
                 var dt = lt ? Math.min((t - lt) / 1000, 0.1) : 0.016;
                 renderLoop.lt = t;
 
-                // PATCH: Position lerp — k=1.5 → ~0.3s da target ga yetadi (k=7 juda tez edi, GPS noise o'tib ketardi)
-                if (tLat != null && tLng != null && dLat != null && dLng != null) {
-                    var posAlpha = 1 - Math.pow(0.001, dt * 1.5);
-                    dLat = lerp(dLat, tLat, posAlpha);
-                    dLng = lerp(dLng, tLng, posAlpha);
+                var _nowMs = Date.now();
+
+                // predictPosition ─────────────────────────────────────────────────────────
+                // _drScale: smoothly activates dead reckoning between 2–5 km/h.
+                // Eliminates the flicker that a hard spd>2 threshold causes at low speed.
+                // Formula: 0 when spd≤2, ramps linearly to 1 at spd=5, capped at 1.
+                var _drScale = Math.min(Math.max((spd - 2) / 3, 0), 1);
+                if (_gpsAnchorLat !== null && _drScale > 0) {
+                    var _drSec = Math.min((_nowMs - _gpsAnchorMs) / 1000, 2.5);
+                    var _drDist = (spd / 3.6) * _drSec * _drScale; // meters to extrapolate
+                    // Route-based prediction: follows road geometry through curves.
+                    // Falls back to spherical-bearing projection if no route loaded.
+                    var _rp = advanceAlongRoute(_gpsAnchorLat, _gpsAnchorLng, _routeAnchorIdx, _drDist);
+                    if (_rp !== null) {
+                        _predLat = _rp[0];
+                        _predLng = _rp[1];
+                    } else {
+                        // Spherical projection along displayBearing — correct for short arcs.
+                        var _R = 6371000;
+                        var _bRad = displayBearing * Math.PI / 180;
+                        var _lat1R = _gpsAnchorLat * Math.PI / 180;
+                        var _dR = _drDist / _R;
+                        var _lat2R = Math.asin(Math.sin(_lat1R) * Math.cos(_dR) + Math.cos(_lat1R) * Math.sin(_dR) * Math.cos(_bRad));
+                        _predLat = _lat2R * 180 / Math.PI;
+                        _predLng = _gpsAnchorLng + Math.atan2(Math.sin(_bRad) * Math.sin(_dR) * Math.cos(_lat1R), Math.cos(_dR) - Math.sin(_lat1R) * Math.sin(_lat2R)) * 180 / Math.PI;
+                    }
+                } else {
+                    _predLat = tLat;
+                    _predLng = tLng;
                 }
 
-                // PATCH: Camera bearing smooth (map rotation)
-                if (!useManualBearing) targetBearing = northUpMode ? 0 : brg;
-                var rotAlpha = 1 - Math.pow(0.001, dt * 1.8);
-                displayBearing = lerpAngle(displayBearing, targetBearing, rotAlpha);
+                // updatePosition ─────────────────────────────────────────────────────────
+                // τ_pos = 0.50s when parked: heavily damps GPS noise, prevents jitter.
+                // τ_pos = 0.12s when moving: fast settling (~360ms), GPS jumps absorbed.
+                // α = 1 - exp(-dt / τ)
+                var _tauPos = spd < 3 ? 0.50 : 0.12;
+                if (_predLat !== null && _predLng !== null) {
+                    if (dLat === null) { dLat = _predLat; dLng = _predLng; }
+                    else {
+                        var _posDecay = Math.exp(-dt / _tauPos);
+                        dLat = _predLat + (dLat - _predLat) * _posDecay;
+                        dLng = _predLng + (dLng - _predLng) * _posDecay;
+                        // Snap to exact target once sub-nanodegree to stop floating-point jitter.
+                        if (Math.abs(dLat - _predLat) < 1e-9 && Math.abs(dLng - _predLng) < 1e-9) {
+                            dLat = _predLat; dLng = _predLng;
+                        }
+                    }
+                }
 
-                // PATCH: Arrow heading — rotationAlignment:'viewport' → MapLibre hech narsa qo'shmaydi.
-                // Screen angle = displayHeading - displayBearing
-                //   heading-up rejim: displayHeading ≈ displayBearing → 0° (screen-up, forward) ✓
-                //   north-up rejim: displayHeading=90, displayBearing=0 → 90° (screen-right, east) ✓
-                //   manual rotation: displayBearing o'zgaradi, displayHeading qoladi → to'g'ri ✓
-                var headAlpha = 1 - Math.pow(0.001, dt * 4);
-                displayHeading = lerpAngle(displayHeading, brg, headAlpha);
+                // Camera position smoothing ───────────────────────────────────────────────
+                // τ_cam = 0.04s: eliminates any remaining float noise in dLat/dLng before
+                // it reaches the GPU. Adds <60ms imperceptible lag at 60fps.
+                if (dLat !== null) {
+                    if (_camLat === null) { _camLat = dLat; _camLng = dLng; }
+                    else {
+                        var _camDecay = Math.exp(-dt / 0.04);
+                        _camLat = dLat + (_camLat - dLat) * _camDecay;
+                        _camLng = dLng + (_camLng - dLng) * _camDecay;
+                    }
+                }
+
+                // updateBearing ─────────────────────────────────────────────────────────
+                // τ_brg = 0.80 - 0.65 × min(spd/30, 1)
+                // τ at  0 km/h: 0.80s — absorbs GPS bearing noise when nearly stopped.
+                // τ at 30 km/h: 0.15s — tracks highway bends without lag.
+                // τ at 60 km/h: 0.15s — capped; faster would overshoot sharp turns.
+                if (!useManualBearing) targetBearing = northUpMode ? 0 : brg;
+                var _tauBrg = 0.80 - 0.65 * Math.min(spd / 30, 1);
+                var _brgDecay = Math.exp(-dt / _tauBrg);
+                var _brgShortcut = ((targetBearing - displayBearing + 540) % 360) - 180;
+                displayBearing = (displayBearing + _brgShortcut * (1 - _brgDecay) + 360) % 360;
+
+                // Arrow heading: τ = 0.08s — leads the camera turn so arrow "points ahead".
+                var _headDecay = Math.exp(-dt / 0.08);
+                var _hdShortcut = ((brg - displayHeading + 540) % 360) - 180;
+                displayHeading = (displayHeading + _hdShortcut * (1 - _headDecay) + 360) % 360;
                 if (arrowEl) arrowEl.style.transform = 'rotate(' + ((displayHeading - displayBearing + 720) % 360) + 'deg)';
 
-                // Update driver marker position
-                if (driverMarker && dLat != null && dLng != null) {
+                if (driverMarker && dLat !== null && dLng !== null) {
                     driverMarker.setLngLat([dLng, dLat]);
                 }
 
-                // Camera follow — locked rejimda driver ni markaz ushlab turadi
-                if (locked && dLat != null && dLng != null) {
-                    var now = Date.now();
-                    if (now - lastCam > 160) {
-                        lastCam = now;
-                        var zoom = speedToZoom(spd);
-                        var H = window.innerHeight;
-                        map.easeTo({
-                            center: [dLng, dLat],
-                            bearing: displayBearing,
-                            pitch: 60,
-                            zoom: zoom,
-                            padding: {
-                                top: 80,
-                                bottom: Math.round(H * 0.45),
-                                left: 0,
-                                right: 0
-                            },
-                            duration: 200,
-                            easing: function(t) { return t < 0.5 ? 2*t*t : -1+(4-2*t)*t; }
-                        });
+                // updateCamera ──────────────────────────────────────────────────────────
+                // Uses _camLat/Lng (camera-smoothed position) — not raw dLat/dLng —
+                // to avoid float jitter reaching the GPU.
+                // _screenRatio: 0.15 at rest → 0.25 at 80 km/h.
+                // Larger ratio = vehicle lower on screen = more road visible ahead.
+                // GPU redraw suppressed when position and bearing are sub-pixel stable.
+                if (locked && _camLat !== null && _nowMs >= _camBlockUntil) {
+                    var _zoom = speedToZoom(spd);
+                    var _brgDelta = Math.abs(((displayBearing - _lastCamBrg + 540) % 360) - 180);
+                    var _moved = Math.abs(_camLat - _lastCamLat) > 1e-6 || Math.abs(_camLng - _lastCamLng) > 1e-6;
+                    if (_moved || _brgDelta > 0.05 || _zoom !== _lastCamZoom) {
+                        var _pitch = 60;
+                        var _mpp = 156543 * Math.cos(_camLat * Math.PI / 180) / Math.pow(2, _zoom);
+                        var _screenRatio = 0.15 + 0.10 * Math.min(spd / 80, 1);
+                        var _fwd = window.innerHeight * _screenRatio * _mpp / Math.cos(_pitch * Math.PI / 180);
+                        var _cc = getOffsetCenter(_camLat, _camLng, displayBearing, _fwd);
+                        map.jumpTo({ center: [_cc[1], _cc[0]], bearing: displayBearing, pitch: _pitch, zoom: _zoom });
+                        _lastCamLat = _camLat;
+                        _lastCamLng = _camLng;
+                        _lastCamBrg = displayBearing;
+                        _lastCamZoom = _zoom;
                     }
                 }
 
@@ -1238,11 +1326,7 @@ HTML_CONTENT = """
             try {
                 if (!map || !ORDER_DATA) return;
                 if (!isValidCoord(lat, lng)) return;
-                // Haqiqiy GPS heading ni saqlab qo'yamiz (null bo'lsa bufferga kirmasin)
-                var _trueGpsHeading = (heading != null && !isNaN(heading)) ? heading : null;
-                if (heading == null || isNaN(heading)) heading = lastHeading;
-                lastHeading = heading;
-                // Yo'lga snapping: Turf mavjud bo'lsa aniq geodezik, aks holda sodda geometriya
+                var _prevSnappedLat = tLat, _prevSnappedLng = tLng;
                 var sl = lat, sa = lng;
                 if (typeof turf !== 'undefined' && _driverRouteLine && _driverRouteLine.geometry) {
                     try {
@@ -1288,38 +1372,65 @@ HTML_CONTENT = """
                 tLat = sl;
                 tLng = sa;
                 spd = speedKmh;
-                // Progressive route trim (sariq chiziqning o'tib ketgan qismini o'chirib borish)
-                updateProgressiveRoute(sa, sl); // (lon, lat) tartibida
-                // Heading pipeline: GPS buffer + route tangent fallback
-                // Hysteresis: buffer faqat HEADING_CLEAR_THRESHOLD (3 km/h) dan past bo'lganda tozalanadi.
-                // SPEED_THRESHOLD_KMH (5 km/h) atrofidagi tebranish bufferga ta'sir qilmaydi.
-                if (speedKmh < HEADING_CLEAR_THRESHOLD) {
-                    headingBuffer = [];
+                // Velocity estimation with EMA smoothing at GPS rate.
+                // Raw velocity = Δsnapped / Δt_gps. One noisy GPS fix can spike ±27 km/h
+                // on the raw estimate; EMA filters this without staling the prediction.
+                // α_vel: 0.4 at low speed (τ≈4s at 2s GPS rate) → 0.7 at 20+ km/h (τ≈1.5s).
+                // Conversion: τ = -Δt / ln(1-α). α=0.4 @ Δt=2s → τ=3.9s. α=0.7 → τ=1.5s.
+                // Zeroed below 3 km/h so parked GPS noise never feeds the prediction.
+                var _drDtSec = _gpsAnchorMs > 0 ? (now - _gpsAnchorMs) / 1000 : 0;
+                if (_gpsAnchorLat !== null && _drDtSec > 0.1 && speedKmh > 3) {
+                    var _rawVelLat = (sl - _gpsAnchorLat) / _drDtSec;
+                    var _rawVelLng = (sa - _gpsAnchorLng) / _drDtSec;
+                    var _alphaVel = 0.4 + 0.3 * Math.min(speedKmh / 20, 1);
+                    _smoothVelLat += (_rawVelLat - _smoothVelLat) * _alphaVel;
+                    _smoothVelLng += (_rawVelLng - _smoothVelLng) * _alphaVel;
+                    _velLat = _smoothVelLat;
+                    _velLng = _smoothVelLng;
+                } else {
+                    _smoothVelLat = 0; _smoothVelLng = 0;
+                    _velLat = 0; _velLng = 0;
                 }
-                // Faqat haqiqiy GPS heading bufferga qo'shiladi (fallback 0° qiymati kirmasin)
-                if (_trueGpsHeading !== null) {
-                    headingBuffer.push(_trueGpsHeading);
-                    if (headingBuffer.length > 5) headingBuffer.shift();
+                // Cache nearest route segment index for advanceAlongRoute in renderLoop.
+                // Runs only on GPS arrival (every ~2s), not per-frame — O(n) is acceptable.
+                if (_driverRouteCoords && _driverRouteCoords.length >= 2) {
+                    var _bestIdx = 0, _bestD2 = Infinity;
+                    for (var _ri = 0; _ri < _driverRouteCoords.length - 1; _ri++) {
+                        var _rd2 = haversineM(_driverRouteCoords[_ri][1], _driverRouteCoords[_ri][0], sl, sa);
+                        if (_rd2 < _bestD2) { _bestD2 = _rd2; _bestIdx = _ri; }
+                    }
+                    _routeAnchorIdx = _bestIdx;
                 }
-                var smoothHeading = headingBuffer.length > 0 ? circularMeanHeadings(headingBuffer) : null;
-                var tangentBrg = (typeof turf !== 'undefined' && _driverRouteLine)
-                    ? getRouteTangentBearing(sa, sl) : null;
-                // Past tezlikda kichik burilishlar (3-5°) ham o'tkazib yuborilmasligi uchun adaptive threshold
-                var _hThresh = speedKmh > SPEED_THRESHOLD_KMH ? HEADING_CHANGE_THRESHOLD : 4;
-                if (speedKmh > SPEED_THRESHOLD_KMH) {
-                    var candidateBrg = (smoothHeading != null) ? smoothHeading
-                        : (tangentBrg != null ? tangentBrg : brg);
-                    var diff = Math.abs(((candidateBrg - brg + 540) % 360) - 180);
-                    if (diff >= _hThresh) brg = candidateBrg;
-                } else if (tangentBrg != null) {
-                    var diff2 = Math.abs(((tangentBrg - brg + 540) % 360) - 180);
-                    if (diff2 >= _hThresh) brg = tangentBrg;
+                _gpsAnchorLat = sl;
+                _gpsAnchorLng = sa;
+                _gpsAnchorMs = now;
+                updateProgressiveRoute(sa, sl);
+                // Bearing: smooth blend between route-tangent (low speed) and coordinate
+                // (high speed + sufficient movement). Replaces the hard 8 km/h cut.
+                // _speedW: 0 at ≤5 km/h → 1 at ≥15 km/h.
+                // _distW:  0 at ≤3 m moved → 1 at ≥10 m moved.
+                // _coordW = _speedW × _distW: BOTH conditions must be met for coordinate bearing.
+                // Below 3 km/h the block is skipped entirely — bearing is frozen.
+                if (_prevSnappedLat != null && _prevSnappedLng != null && speedKmh >= 3) {
+                    var _moveDist = haversineM(sl, sa, _prevSnappedLat, _prevSnappedLng);
+                    var _tangentBrg = (typeof turf !== 'undefined' && _driverRouteLine)
+                        ? getRouteTangentBearing(sa, sl) : null;
+                    var _speedW = Math.min(Math.max((speedKmh - 5) / 10, 0), 1);
+                    var _distW  = Math.min(Math.max((_moveDist - 3) / 7, 0), 1);
+                    var _coordW = _speedW * _distW;
+                    var _coordBrg = _moveDist >= 3 ? calcBearing(_prevSnappedLat, _prevSnappedLng, sl, sa) : brg;
+                    var _tangBrg  = _tangentBrg !== null ? _tangentBrg : brg;
+                    var _blendDiff = ((_coordBrg - _tangBrg + 540) % 360) - 180;
+                    var _blended  = (_tangBrg + _blendDiff * _coordW + 360) % 360;
+                    var _delta = Math.abs(((_blended - brg + 540) % 360) - 180);
+                    if (_delta >= 1) brg = _blended;
                 }
                 if (!driverMarker) {
-                    // Birinchi frame uchun: speedKmh = 0 bo'lsa ham brg + barcha bearing state ni to'g'ri init qilish
-                    // Ustuvorlik: marshrut tangenti > GPS heading > mavjud brg
-                    var _initBrg = tangentBrg !== null ? tangentBrg
-                        : (smoothHeading !== null ? smoothHeading : brg);
+                    var _tangentInit = (typeof turf !== 'undefined' && _driverRouteLine)
+                        ? getRouteTangentBearing(sa, sl) : null;
+                    var _initBrg = _tangentInit !== null ? _tangentInit
+                        : ((_prevSnappedLat != null && _prevSnappedLng != null)
+                            ? calcBearing(_prevSnappedLat, _prevSnappedLng, sl, sa) : brg);
                     brg = _initBrg;
                     displayHeading = _initBrg;
                     displayBearing = _initBrg;
