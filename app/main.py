@@ -733,6 +733,18 @@ HTML_CONTENT = """
                     _predLat = tLat;
                     _predLng = tLng;
                 }
+                // Snap predicted position back onto the route every frame.
+                // Eliminates off-road drift from the spherical fallback and straight-line
+                // lerp gaps at corners — prediction now always sits exactly on the polyline.
+                if (typeof turf !== 'undefined' && _driverRouteLine && _driverRouteLine.geometry && _predLat !== null) {
+                    try {
+                        var _predSnap = turf.nearestPointOnLine(_driverRouteLine, turf.point([_predLng, _predLat]));
+                        if (_predSnap && _predSnap.geometry && _predSnap.geometry.coordinates) {
+                            _predLat = _predSnap.geometry.coordinates[1];
+                            _predLng = _predSnap.geometry.coordinates[0];
+                        }
+                    } catch (_) {}
+                }
 
                 // updatePosition ─────────────────────────────────────────────────────────
                 // τ_pos = 0.50s when parked: heavily damps GPS noise, prevents jitter.
@@ -756,7 +768,7 @@ HTML_CONTENT = """
                 // τ_cam = 0.04s: eliminates any remaining float noise in dLat/dLng before
                 // it reaches the GPU. Adds <60ms imperceptible lag at 60fps.
                 if (dLat !== null) {
-                    if (_camLat === null) { _camLat = dLat; _camLng = dLng; }
+                    if (_camLat === null) { _camLat = tLat !== null ? tLat : dLat; _camLng = tLng !== null ? tLng : dLng; }
                     else {
                         var _camDecay = Math.exp(-dt / 0.04);
                         _camLat = dLat + (_camLat - dLat) * _camDecay;
@@ -781,8 +793,8 @@ HTML_CONTENT = """
                 displayHeading = (displayHeading + _hdShortcut * (1 - _headDecay) + 360) % 360;
                 if (arrowEl) arrowEl.style.transform = 'rotate(' + ((displayHeading - displayBearing + 720) % 360) + 'deg)';
 
-                if (driverMarker && dLat !== null && dLng !== null) {
-                    driverMarker.setLngLat([dLng, dLat]);
+                if (driverMarker && tLat !== null && tLng !== null) {
+                    driverMarker.setLngLat([tLng, tLat]);
                 }
 
                 // updateCamera ──────────────────────────────────────────────────────────
@@ -791,17 +803,12 @@ HTML_CONTENT = """
                 // _screenRatio: 0.15 at rest → 0.25 at 80 km/h.
                 // Larger ratio = vehicle lower on screen = more road visible ahead.
                 // GPU redraw suppressed when position and bearing are sub-pixel stable.
-                if (locked && _camLat !== null && _nowMs >= _camBlockUntil) {
+                if (_camLat !== null) {
                     var _zoom = speedToZoom(spd);
                     var _brgDelta = Math.abs(((displayBearing - _lastCamBrg + 540) % 360) - 180);
                     var _moved = Math.abs(_camLat - _lastCamLat) > 1e-6 || Math.abs(_camLng - _lastCamLng) > 1e-6;
                     if (_moved || _brgDelta > 0.05 || _zoom !== _lastCamZoom) {
-                        var _pitch = 60;
-                        var _mpp = 156543 * Math.cos(_camLat * Math.PI / 180) / Math.pow(2, _zoom);
-                        var _screenRatio = 0.15 + 0.10 * Math.min(spd / 80, 1);
-                        var _fwd = window.innerHeight * _screenRatio * _mpp / Math.cos(_pitch * Math.PI / 180);
-                        var _cc = getOffsetCenter(_camLat, _camLng, displayBearing, _fwd);
-                        map.jumpTo({ center: [_cc[1], _cc[0]], bearing: displayBearing, pitch: _pitch, zoom: _zoom });
+                        map.jumpTo({ center: [_camLng, _camLat], bearing: displayBearing, pitch: 60, zoom: _zoom });
                         _lastCamLat = _camLat;
                         _lastCamLng = _camLng;
                         _lastCamBrg = displayBearing;
