@@ -253,7 +253,7 @@ HTML_CONTENT = """
         #eta-box { background: white; border-radius: 8px; padding: 10px 20px; box-shadow: 0 2px 10px rgba(0,0,0,0.18); text-align: center; min-width: 100px; }
         #eta-t { font-size: 18px; font-weight: 800; color: var(--uber-blue); }
         #eta-d { font-size: 12px; color: #888; margin-top: 2px; }
-        .dm-wrap { position: relative; }
+        .dm-wrap { position: relative; display: inline-block; width: 48px; height: 48px; }
         .dm-ring { position: absolute; inset: -10px; border-radius: 50%; background: rgba(39,110,241,0.15); pointer-events: none; }
         .dm-circle { width: 48px; height: 48px; border-radius: 50%; background: white; box-shadow: 0 3px 14px rgba(0,0,0,0.28); display: flex; align-items: center; justify-content: center; position: relative; }
         .dm-arrow { width: 26px; height: 26px; fill: var(--uber-blue); }
@@ -796,8 +796,8 @@ HTML_CONTENT = """
                 displayHeading = (displayHeading + _hdShortcut * (1 - _headDecay) + 360) % 360;
                 if (arrowEl) arrowEl.style.transform = 'rotate(' + ((displayHeading - displayBearing + 720) % 360) + 'deg)';
 
-                if (driverMarker && tLat !== null && tLng !== null) {
-                    driverMarker.setLngLat([tLng, tLat]);
+                if (driverMarker && dLat !== null && dLng !== null) {
+                    driverMarker.setLngLat([dLng, dLat]);
                 }
 
                 // updateCamera ──────────────────────────────────────────────────────────
