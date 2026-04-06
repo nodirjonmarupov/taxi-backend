@@ -57,7 +57,7 @@ HTML_CONTENT = """
             top: 0; left: 0; right: 0; bottom: 0;
             z-index: 1;
         }
-        #map { width: 100%; height: 100%; transition: height 0.4s cubic-bezier(0.4, 0, 0.2, 1); z-index: 1; padding-bottom: env(safe-area-inset-bottom); box-sizing: border-box; }
+        #map { width: 100%; height: 100%; z-index: 1; padding-bottom: env(safe-area-inset-bottom); box-sizing: border-box; }
         #map.minimized { height: 0vh; opacity: 0; display: none; }
         .bottom-panel {
             position: fixed; bottom: 0; left: 0; width: 100%;
@@ -369,6 +369,7 @@ HTML_CONTENT = """
         let _pendingGps = null;    // queued GPS update received before _driverRouteLine was ready
         let _firstSnapDone = false; // true after the first successful Turf snap; guards dead zone
         let _snapRouteLine = null;  // trimmed forward-only snap line; rebuilt after each snap
+        let _lastRerouteMs = 0;    // timestamp of last reroute request (5 s cooldown)
         let northUpMode = false;
         let isManualMode = false, gestureStartAngle = null, gestureStartBearing = 0, manualBearing = 0, manualModeTimer = null, useManualBearing = false;
         let renderLoopRunning = false;
@@ -1520,6 +1521,7 @@ HTML_CONTENT = """
                     }
                     tripData.lastPosition = driverPos;
                 }
+                checkOffRoute(lat, lng);
             } catch (e) {}
         }
 
@@ -1774,6 +1776,42 @@ HTML_CONTENT = """
             }
         }
 
+        /**
+         * Off-route detection: called after every GPS update during a trip.
+         * Uses turf.pointToLineDistance to measure perpendicular distance from
+         * the raw GPS fix to _driverRouteLine. If > 70 m and the 5-second
+         * cooldown has elapsed, a fresh OSRM route is requested and the map
+         * polyline is replaced. Snap state is reset so the driver snaps cleanly
+         * to the new route on the next GPS update.
+         */
+        function checkOffRoute(lat, lng) {
+            if (appState !== 'trip') return;
+            if (typeof turf === 'undefined') return;
+            if (!_driverRouteLine || !_driverRouteLine.geometry) return;
+            if (!ORDER_DATA ||
+                !isValidCoord(ORDER_DATA.destination_latitude, ORDER_DATA.destination_longitude)) return;
+            if (Date.now() - _lastRerouteMs < 5000) return;
+
+            try {
+                var distM = turf.pointToLineDistance(
+                    turf.point([lng, lat]),
+                    _driverRouteLine,
+                    { units: 'meters' }
+                );
+                if (distM > 70) {
+                    _lastRerouteMs = Date.now();
+                    // Reset snap state so next GPS anchors to the new route.
+                    _firstSnapDone = false;
+                    _routeAnchorIdx = 0;
+                    _snapRouteLine = null;
+                    drawRoute(
+                        { lat: lat, lng: lng },
+                        { lat: ORDER_DATA.destination_latitude, lng: ORDER_DATA.destination_longitude }
+                    );
+                }
+            } catch (_) {}
+        }
+
         function drawRouteAB(fromA, toB) {
             if (!map || !fromA || !toB) return;
             var fromLat = fromA.lat != null ? fromA.lat : fromA[0];
@@ -1967,9 +2005,13 @@ HTML_CONTENT = """
         });
         document.addEventListener('visibilitychange', function() {
             if (document.visibilityState === 'visible') {
+                if (map) map.resize();
                 updateSyncUI();
                 flushPendingTrips();
             }
+        });
+        window.addEventListener('resize', function() {
+            if (map) map.resize();
         });
 
         window.onload = init;
