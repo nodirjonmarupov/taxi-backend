@@ -366,6 +366,9 @@ HTML_CONTENT = """
         let _predLat = null, _predLng = null;
         let _camLat = null, _camLng = null;
         let _routeAnchorIdx = 0;
+        let _pendingGps = null;    // queued GPS update received before _driverRouteLine was ready
+        let _firstSnapDone = false; // true after the first successful Turf snap; guards dead zone
+        let _snapRouteLine = null;  // trimmed forward-only snap line; rebuilt after each snap
         let northUpMode = false;
         let isManualMode = false, gestureStartAngle = null, gestureStartBearing = 0, manualBearing = 0, manualModeTimer = null, useManualBearing = false;
         let renderLoopRunning = false;
@@ -1345,12 +1348,18 @@ HTML_CONTENT = """
             try {
                 if (!map || !ORDER_DATA) return;
                 if (!isValidCoord(lat, lng)) return;
+                // Route not loaded yet — queue this update and return.
+                // Will be replayed exactly once after _driverRouteLine is set.
+                if (_driverRouteLine === null) {
+                    _pendingGps = { lat: lat, lng: lng, heading: heading };
+                    return;
+                }
                 var _prevSnappedLat = tLat, _prevSnappedLng = tLng;
                 var sl = lat, sa = lng;
                 if (typeof turf !== 'undefined' && _driverRouteLine && _driverRouteLine.geometry) {
                     try {
                         var _snapPt = turf.point([lng, lat]);
-                        var _snapRes = turf.nearestPointOnLine(_driverRouteLine, _snapPt, { units: 'kilometers' });
+                        var _snapRes = turf.nearestPointOnLine(_snapRouteLine || _driverRouteLine, _snapPt, { units: 'kilometers' });
                         if (_snapRes && _snapRes.geometry && _snapRes.geometry.coordinates) {
                             sa = _snapRes.geometry.coordinates[0]; // lon
                             sl = _snapRes.geometry.coordinates[1]; // lat
@@ -1360,7 +1369,15 @@ HTML_CONTENT = """
                             if (_snapRes.properties && _snapRes.properties.index != null) {
                                 _routeAnchorIdx = Math.min(_snapRes.properties.index,
                                     _driverRouteCoords.length > 1 ? _driverRouteCoords.length - 2 : 0);
+                                // Rebuild trimmed snap line: snapped point + all vertices ahead.
+                                // Starting from the exact snapped coordinate (not segment start vertex)
+                                // ensures the next snap cannot project backward even by one segment.
+                                var _trimCoords = [[sa, sl]].concat(_driverRouteCoords.slice(_routeAnchorIdx + 1));
+                                if (_trimCoords.length >= 2) {
+                                    try { _snapRouteLine = turf.lineString(_trimCoords); } catch (_) {}
+                                }
                             }
+                            _firstSnapDone = true;
                         }
                     } catch (_e) {
                         if (routeCoordinates && routeCoordinates.length >= 2) {
@@ -1373,8 +1390,10 @@ HTML_CONTENT = """
                     sl = _fb2[0]; sa = _fb2[1]; _routeAnchorIdx = _fb2[2];
                 }
                 // Adaptive dead zone: tezlikka qarab (2m..7m) GPS noise filtri
+                // Bypassed on the first snap so a raw-GPS anchor can never be frozen onto
+                // the route line — prevTLat/Lng is guaranteed clean (on-route) from here on.
                 var prevTLat = tLat, prevTLng = tLng;
-                if (prevTLat != null && prevTLng != null) {
+                if (_firstSnapDone && prevTLat != null && prevTLng != null) {
                     var snapMoveDist = haversineM(sl, sa, prevTLat, prevTLng);
                     var _dzThresh = Math.max(2.0, Math.min(spd * 0.15, 7.0));
                     if (snapMoveDist < _dzThresh) {
@@ -1685,6 +1704,12 @@ HTML_CONTENT = """
                     if (typeof turf !== 'undefined' && _driverRouteCoords.length >= 2) {
                         try { _driverRouteLine = turf.lineString(_driverRouteCoords); } catch (_) {}
                     }
+                    _snapRouteLine = _driverRouteLine;
+                    // Replay any GPS update that arrived before the route was ready.
+                    if (_pendingGps !== null) {
+                        var _pg = _pendingGps; _pendingGps = null;
+                        updateDriverMarker(_pg.lat, _pg.lng, _pg.heading);
+                    }
                     var routeGeoJSON = buildRouteGeoJSON(routeCoordinates);
                     safeAddRouteLayer(routeGeoJSON);
                     setTurnAndDistFromDriver({ lat: fromLat, lng: fromLng });
@@ -1723,6 +1748,13 @@ HTML_CONTENT = """
 
         function fallbackStraightLine(fromLat, fromLng, toLat, toLng) {
             routeCoordinates = [[fromLat, fromLng], [toLat, toLng]];
+            // Build _driverRouteLine so the queue gate is satisfied and snapping works
+            // on the straight-line fallback exactly the same as on a real OSRM route.
+            _driverRouteCoords = [[fromLng, fromLat], [toLng, toLat]];
+            if (typeof turf !== 'undefined' && _driverRouteCoords.length >= 2) {
+                try { _driverRouteLine = turf.lineString(_driverRouteCoords); } catch (_) {}
+            }
+            _snapRouteLine = _driverRouteLine;
             routeRoadDistanceKm = haversineM(fromLat, fromLng, toLat, toLng) / 1000;
             routeInstructions = [{ text: "To'g'ri yo'l", type: -1, index: 0 }];
             var routeGeoJSON = buildRouteGeoJSON(routeCoordinates);
@@ -1730,6 +1762,10 @@ HTML_CONTENT = """
             safeAddRouteABLayer(routeGeoJSON);
             setTurnAndDistFromDriver({ lat: fromLat, lng: fromLng });
             updateNavUI();
+            if (_pendingGps !== null) {
+                var _pg = _pendingGps; _pendingGps = null;
+                updateDriverMarker(_pg.lat, _pg.lng, _pg.heading);
+            }
         }
 
         function drawRouteAB(fromA, toB) {
