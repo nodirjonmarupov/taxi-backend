@@ -573,6 +573,10 @@ async def update_driver_location_api(
         # Redis ishlasa ham, DB throttle yangilashda xato bo‘lsa matching vaqtincha ishlamasligi mumkin.
         # Shuning uchun warning log qilamiz, lekin endpointni fail qilmexmaymiz.
         logger.warning(f"DB driver location update xato: {ex}")
+        try:
+            await db.rollback()
+        except Exception:
+            pass
 
     order = await OrderCRUD.get_active_order_for_driver(db, body.driver_id)
     if not order or not order.user_id:
