@@ -1348,9 +1348,13 @@ HTML_CONTENT = """
             try {
                 if (!map || !ORDER_DATA) return;
                 if (!isValidCoord(lat, lng)) return;
-                // Route not loaded yet — queue this update and return.
-                // Will be replayed exactly once after _driverRouteLine is set.
-                if (_driverRouteLine === null) {
+                // Route not loaded yet AND marker already exists — queue and wait.
+                // The first call (driverMarker === null) must pass through so it can
+                // call addDriverMarker() and drawRoute(), which is what triggers the
+                // route fetch that eventually sets _driverRouteLine. Queuing the first
+                // call would create a deadlock: route is never fetched, _driverRouteLine
+                // is never set, every subsequent GPS is queued forever → blank screen.
+                if (_driverRouteLine === null && driverMarker !== null) {
                     _pendingGps = { lat: lat, lng: lng, heading: heading };
                     return;
                 }
