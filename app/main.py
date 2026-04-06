@@ -593,21 +593,33 @@ HTML_CONTENT = """
             var last = _driverRouteCoords[_driverRouteCoords.length - 1];
             return [last[1], last[0]];
         }
+        // Returns [snappedLat, snappedLng, segmentIdx].
+        // Uses cos(lat) to convert longitude degrees into the same metric scale as latitude
+        // degrees before computing the projection dot product.
+        // Without this correction, 1° lon ≈ 84 km at lat 41° vs 1° lat ≈ 111 km → 24%
+        // projection error → marker consistently offset from road.
         function snapToRoute(lat, lng) {
             var coords = routeCoordinates;
-            if (!coords || coords.length < 2) return [lat, lng];
-            var toLL = function(c) { return c && (c.lat != null) ? [c.lat, c.lng] : (Array.isArray(c) ? c : [c[0], c[1]]); };
-            var best = null, bd = Infinity;
+            if (!coords || coords.length < 2) return [lat, lng, 0];
+            var toLL = function(c) { return c && (c.lat != null) ? [c.lat, c.lng] : [c[0], c[1]]; };
+            var cosLat = Math.cos(lat * Math.PI / 180);
+            var best = null, bestIdx = 0, bd = Infinity;
             for (var i = 0; i < coords.length - 1; i++) {
                 var p1 = toLL(coords[i]), p2 = toLL(coords[i + 1]);
                 var y1 = p1[0], x1 = p1[1], y2 = p2[0], x2 = p2[1];
-                var dy = y2 - y1, dx = x2 - x1, l2 = dy * dy + dx * dx;
+                // Scale longitude deltas by cosLat so the dot product is proportional to meters.
+                var dy = y2 - y1;
+                var dx = (x2 - x1) * cosLat;
+                var l2 = dy * dy + dx * dx;
                 if (!l2) continue;
-                var t = Math.max(0, Math.min(1, ((lat - y1) * dy + (lng - x1) * dx) / l2));
-                var d = Math.hypot(lat - y1 - t * dy, lng - x1 - t * dx);
-                if (d < bd) { bd = d; best = [y1 + t * dy, x1 + t * dx]; }
+                var t = Math.max(0, Math.min(1, ((lat - y1) * dy + (lng - x1) * cosLat * dx) / l2));
+                var py = y1 + t * (y2 - y1);
+                var px = x1 + t * (x2 - x1);
+                var d = haversineM(lat, lng, py, px); // metric distance — correct basis for comparison
+                if (d < bd) { bd = d; best = [py, px]; bestIdx = i; }
             }
-            return (best && bd < 0.005) ? best : [lat, lng];
+            if (best && bd < 500) return [best[0], best[1], bestIdx];
+            return [lat, lng, 0];
         }
         function getOffsetCenter(lat, lon, bearingDeg, meters) {
             if (bearingDeg == null || isNaN(bearingDeg)) return [lat, lon];
@@ -1335,16 +1347,23 @@ HTML_CONTENT = """
                         if (_snapRes && _snapRes.geometry && _snapRes.geometry.coordinates) {
                             sa = _snapRes.geometry.coordinates[0]; // lon
                             sl = _snapRes.geometry.coordinates[1]; // lat
+                            // Turf returns the exact segment index — use it directly.
+                            // The old vertex-search loop found the nearest START node which is wrong
+                            // when the projection point is near a segment's end (off-by-one → wrong DR).
+                            if (_snapRes.properties && _snapRes.properties.index != null) {
+                                _routeAnchorIdx = Math.min(_snapRes.properties.index,
+                                    _driverRouteCoords.length > 1 ? _driverRouteCoords.length - 2 : 0);
+                            }
                         }
                     } catch (_e) {
                         if (routeCoordinates && routeCoordinates.length >= 2) {
                             var _fb = snapToRoute(lat, lng);
-                            sl = _fb[0]; sa = _fb[1];
+                            sl = _fb[0]; sa = _fb[1]; _routeAnchorIdx = _fb[2];
                         }
                     }
                 } else if (routeCoordinates && routeCoordinates.length >= 2) {
                     var _fb2 = snapToRoute(lat, lng);
-                    sl = _fb2[0]; sa = _fb2[1];
+                    sl = _fb2[0]; sa = _fb2[1]; _routeAnchorIdx = _fb2[2];
                 }
                 // Adaptive dead zone: tezlikka qarab (2m..7m) GPS noise filtri
                 var prevTLat = tLat, prevTLng = tLng;
@@ -1391,16 +1410,8 @@ HTML_CONTENT = """
                     _smoothVelLat = 0; _smoothVelLng = 0;
                     _velLat = 0; _velLng = 0;
                 }
-                // Cache nearest route segment index for advanceAlongRoute in renderLoop.
-                // Runs only on GPS arrival (every ~2s), not per-frame — O(n) is acceptable.
-                if (_driverRouteCoords && _driverRouteCoords.length >= 2) {
-                    var _bestIdx = 0, _bestD2 = Infinity;
-                    for (var _ri = 0; _ri < _driverRouteCoords.length - 1; _ri++) {
-                        var _rd2 = haversineM(_driverRouteCoords[_ri][1], _driverRouteCoords[_ri][0], sl, sa);
-                        if (_rd2 < _bestD2) { _bestD2 = _rd2; _bestIdx = _ri; }
-                    }
-                    _routeAnchorIdx = _bestIdx;
-                }
+                // _routeAnchorIdx is now set at snap time (from Turf's properties.index or
+                // snapToRoute's return value). No secondary vertex search needed here.
                 _gpsAnchorLat = sl;
                 _gpsAnchorLng = sa;
                 _gpsAnchorMs = now;
