@@ -15,7 +15,7 @@ depends_on = None
 
 def upgrade() -> None:
     op.execute("""
-        CREATE UNIQUE INDEX idx_driver_one_active_order
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_driver_one_active_order
         ON orders (driver_id)
         WHERE driver_id IS NOT NULL
           AND status IN ('accepted', 'in_progress');
@@ -23,4 +23,4 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    op.drop_index("idx_driver_one_active_order", table_name="orders")
+    op.execute("DROP INDEX IF EXISTS idx_driver_one_active_order")
