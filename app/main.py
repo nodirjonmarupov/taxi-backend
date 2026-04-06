@@ -1348,13 +1348,15 @@ HTML_CONTENT = """
             try {
                 if (!map || !ORDER_DATA) return;
                 if (!isValidCoord(lat, lng)) return;
-                // Route not loaded yet AND marker already exists — queue and wait.
-                // The first call (driverMarker === null) must pass through so it can
-                // call addDriverMarker() and drawRoute(), which is what triggers the
-                // route fetch that eventually sets _driverRouteLine. Queuing the first
-                // call would create a deadlock: route is never fetched, _driverRouteLine
-                // is never set, every subsequent GPS is queued forever → blank screen.
-                if (_driverRouteLine === null && driverMarker !== null) {
+                // Route not loaded yet AND marker already created — queue and wait.
+                // The first call (driverMarker is undefined/falsy) must fall through so
+                // it can call addDriverMarker() and drawRoute(), which triggers the OSRM
+                // fetch that eventually sets _driverRouteLine.
+                // IMPORTANT: use truthiness check (not !== null) because driverMarker is
+                // declared with `let` and starts as `undefined`. `undefined !== null` is
+                // true in JS, so `!== null` would fire on the very first GPS update and
+                // recreate the deadlock (marker never created, route never fetched).
+                if (_driverRouteLine === null && driverMarker) {
                     _pendingGps = { lat: lat, lng: lng, heading: heading };
                     return;
                 }
