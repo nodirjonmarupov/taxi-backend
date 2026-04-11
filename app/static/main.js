@@ -50,7 +50,7 @@ let appState = 'arriving';
 let tripData = { distance: 0, waitingTime: 0, elapsedSeconds: 0, isWaiting: false, lastPosition: null };
 let intervals = { timer: null, position: null };
 
-const API_BASE_URL = '__WEBAPP_BASE_URL__';
+const API_BASE_URL = window.__WEBAPP_BASE_URL__ || window.location.origin;
 fetch(API_BASE_URL + '/api/webapp/tariff?v=' + Date.now(), { headers: { 'ngrok-skip-browser-warning': '1' } })
     .then(function(r){ return r.json(); })
     .then(function(d){ TARIFF.startPrice = d.startPrice||5000; TARIFF.pricePerKm = d.pricePerKm||2500; TARIFF.pricePerMinWaiting = d.pricePerMinWaiting||500; TARIFF.minDistanceUpdate = d.minDistanceUpdate||0.02; })
@@ -683,43 +683,60 @@ async function init() {
 }
 
 function initMap() {
-    if (!ORDER_DATA || !isValidCoord(ORDER_DATA.pickup_latitude, ORDER_DATA.pickup_longitude)) return;
+    if (!ORDER_DATA || !isValidCoord(ORDER_DATA.pickup_latitude, ORDER_DATA.pickup_longitude)) {
+        var leEarly = document.getElementById('loading');
+        if (leEarly) leEarly.classList.add('hidden');
+        showError("Buyurtma joylashuvi noto'g'ri.");
+        return;
+    }
     var lat = ORDER_DATA.pickup_latitude;
     var lon = ORDER_DATA.pickup_longitude;
 
     var driverLat = lat;
     var driverLng = lon;
 
-    map = new maplibregl.Map({
-        container: 'map',
-        style: {
-            version: 8,
-            sources: {
-                osm: {
+    try {
+        map = new maplibregl.Map({
+            container: 'map',
+            style: {
+                version: 8,
+                sources: {
+                    osm: {
+                        type: 'raster',
+                        tiles: [
+                            'https://a.tile.openstreetmap.org/{z}/{x}/{y}.png',
+                            'https://b.tile.openstreetmap.org/{z}/{x}/{y}.png',
+                            'https://c.tile.openstreetmap.org/{z}/{x}/{y}.png'
+                        ],
+                        tileSize: 256,
+                        maxzoom: 19
+                    }
+                },
+                layers: [{
+                    id: 'osm-tiles',
                     type: 'raster',
-                    tiles: [
-                        'https://a.tile.openstreetmap.org/{z}/{x}/{y}.png',
-                        'https://b.tile.openstreetmap.org/{z}/{x}/{y}.png',
-                        'https://c.tile.openstreetmap.org/{z}/{x}/{y}.png'
-                    ],
-                    tileSize: 256,
-                    maxzoom: 19
-                }
+                    source: 'osm'
+                }]
             },
-            layers: [{
-                id: 'osm-tiles',
-                type: 'raster',
-                source: 'osm'
-            }]
-        },
-        center: [driverLng, driverLat],
-        zoom: 17,
-        pitch: 55,
-        bearing: 0,
-        antialias: true
-    });
+            center: [driverLng, driverLat],
+            zoom: 17,
+            pitch: 55,
+            bearing: 0,
+            antialias: true
+        });
+    } catch (e) {
+        var leMap = document.getElementById('loading');
+        if (leMap) leMap.classList.add('hidden');
+        showError("Xarita boshlanmadi.");
+        return;
+    }
 
     map.on('dragstart', function() { locked = false; });
+    map.on('error', function() {
+        var leErr = document.getElementById('loading');
+        if (leErr) leErr.classList.add('hidden');
+        showError("Xarita yuklanishda xatolik.");
+    });
     map.on('load', function() {
         try {
             var dp = document.createElement('div');
@@ -742,10 +759,15 @@ function initMap() {
                 }).setLngLat([destLon, destLat]).addTo(map);
                 drawRouteAB({ lat: lat, lng: lon }, { lat: destLat, lng: destLon });
             }
-            document.getElementById('loading').classList.add('hidden');
+            var leOk = document.getElementById('loading');
+            if (leOk) leOk.classList.add('hidden');
             if (!renderLoopRunning) { renderLoopRunning = true; renderLoop(); }
             setupMapGestures();
-        } catch (e) {}
+        } catch (e) {
+            var leCatch = document.getElementById('loading');
+            if (leCatch) leCatch.classList.add('hidden');
+            showError("Xarita yuklanmadi. Sahifani yangilang.");
+        }
     });
 }
 
@@ -1658,6 +1680,7 @@ async function handleStartTrip() {
 function toggleWaiting() {
     tripData.isWaiting = !tripData.isWaiting;
     const btn = document.getElementById('waitingBtn');
+    if (!btn) return;
     btn.textContent = tripData.isWaiting ? '??DAVOM ETISH' : '??PAUZA / KUTISH';
     btn.className = tripData.isWaiting ? 'action-btn btn-success' : 'action-btn btn-warning';
 }
@@ -1671,7 +1694,9 @@ function handleFinish() {
 async function finishTrip() {
     var orderId = ORDER_ID_CURRENT;
     if (!orderId) { safeAlert("Order ID topilmadi."); return; }
-    var finalFare = document.getElementById('currentFare').textContent.replace(/,/g, '');
+    var fareEl = document.getElementById('currentFare');
+    if (!fareEl) { safeAlert("UI topilmadi."); return; }
+    var finalFare = fareEl.textContent.replace(/,/g, '');
     var distKm = tripData.distance;
     var fp = parseFloat(finalFare);
     if (isNaN(fp) || fp <= 0) {
@@ -1688,11 +1713,12 @@ async function finishTrip() {
     enqueuePendingTrip(item);
     updateSyncUI();
 
-    document.getElementById('loading').classList.remove('hidden');
+    var loadEl = document.getElementById('loading');
+    if (loadEl) loadEl.classList.remove('hidden');
     try {
         await flushPendingTrips();
     } finally {
-        document.getElementById('loading').classList.add('hidden');
+        if (loadEl) loadEl.classList.add('hidden');
     }
 
     var stillPending = getPendingTrips().some(function(x) { return String(x.orderId) === String(orderId); });
@@ -1711,16 +1737,19 @@ function updateTimer() {
 
     const m = Math.floor(tripData.elapsedSeconds / 60).toString().padStart(2, '0');
     const s = (tripData.elapsedSeconds % 60).toString().padStart(2, '0');
-    document.getElementById('tripTime').textContent = `${m}:${s}`;
-    
+    var tripTimeEl = document.getElementById('tripTime');
+    if (tripTimeEl) tripTimeEl.textContent = `${m}:${s}`;
+
     updateTaximeter();
 }
 
 function updateTaximeter() {
     const fare = TARIFF.startPrice + (tripData.distance * TARIFF.pricePerKm) + ((tripData.waitingTime / 60) * TARIFF.pricePerMinWaiting);
     const rounded = Math.round(fare / 100) * 100;
-    document.getElementById('currentFare').textContent = rounded.toLocaleString('en-US');
-    document.getElementById('tripDistance').textContent = tripData.distance.toFixed(2);
+    var curFareEl = document.getElementById('currentFare');
+    var tripDistEl = document.getElementById('tripDistance');
+    if (curFareEl) curFareEl.textContent = rounded.toLocaleString('en-US');
+    if (tripDistEl) tripDistEl.textContent = tripData.distance.toFixed(2);
 }
 
 window.addEventListener('online', function() {
