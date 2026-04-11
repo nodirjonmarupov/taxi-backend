@@ -1,4 +1,4 @@
-﻿(function(){
+(function(){
     var tg = (window.Telegram && window.Telegram.WebApp) ? window.Telegram.WebApp : null;
     if (tg) {
         try { tg.ready(); tg.expand(); } catch (_) {}
@@ -605,7 +605,7 @@ function showOrderCompleted(status) {
     document.getElementById('loading').classList.add('hidden');
 
     var isCompleted = (status === 'completed');
-    var icon = isCompleted ? '?? : '??;
+    var icon = isCompleted ? '✅' : '❌';
     var title = isCompleted ? 'Safar yakunlangan' : 'Buyurtma bekor qilingan';
 
     var overlay = document.createElement('div');
