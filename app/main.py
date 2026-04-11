@@ -10,6 +10,7 @@ import time
 from typing import AsyncGenerator
 
 from fastapi import FastAPI, HTTPException, Response
+from fastapi.exceptions import RequestValidationError
 from pathlib import Path
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, FileResponse
 from fastapi.middleware.cors import CORSMiddleware
@@ -592,15 +593,54 @@ app.add_middleware(
 )
 
 
+@app.exception_handler(RequestValidationError)
+async def request_validation_exception_handler(request, exc: RequestValidationError):
+    """422 validation errors — same JSON shape as other API errors."""
+    logger.warning(
+        "Validation error %s %s: %s",
+        request.method,
+        request.url.path,
+        exc.errors(),
+    )
+    return JSONResponse(
+        status_code=422,
+        content={
+            "error": True,
+            "message": "Validation error",
+            "status_code": 422,
+            "detail": exc.errors(),
+        },
+    )
+
+
 @app.exception_handler(Exception)
 async def json_exception_handler(request, exc):
     """Return JSON for unhandled exceptions so admin panel can parse error responses."""
     if isinstance(exc, HTTPException):
-        return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
-    logger.exception("Unhandled exception: %s", exc)
+        msg = exc.detail if isinstance(exc.detail, str) else "Request error"
+        return JSONResponse(
+            status_code=exc.status_code,
+            content={
+                "error": True,
+                "message": msg,
+                "status_code": exc.status_code,
+                "detail": exc.detail,
+            },
+        )
+    logger.exception(
+        "Unhandled exception %s %s: %s",
+        request.method,
+        request.url.path,
+        exc,
+    )
     return JSONResponse(
         status_code=500,
-        content={"detail": str(exc) if len(str(exc)) < 200 else "Internal server error"},
+        content={
+            "error": True,
+            "message": "Internal server error",
+            "status_code": 500,
+            "detail": "Internal server error",
+        },
     )
 
 

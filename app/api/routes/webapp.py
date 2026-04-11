@@ -2,6 +2,7 @@
 WebApp API routes
 """
 import json
+import time
 from pathlib import Path
 from typing import Optional, Any
 from datetime import datetime
@@ -12,7 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from pydantic import BaseModel
 
 from app.core.database import get_db
-from app.core.redis import get_redis
+from app.core.redis import get_redis, get_trip_state, set_trip_state, delete_trip_state
 from app.utils.webapp_token import verify_webapp_token
 from app.services.driver_location_cache import set_driver_location, get_driver_location as get_driver_location_redis
 from sqlalchemy.orm import selectinload
@@ -21,7 +22,11 @@ from app.crud.order_crud import OrderCRUD
 from app.crud.user import UserCRUD, DriverCRUD
 from app.services.settings_service import get_settings
 from app.utils.trip_finish import sanitize_distance_km, parse_client_final_price
-from app.services.taximeter_service import accumulate_order_distance_for_driver
+from app.services.taximeter_service import (
+    compute_fare,
+    update_distance,
+    verify_final_price,
+)
 from app.models.order import Order, OrderStatus
 from app.core.logger import get_logger
 
@@ -48,6 +53,42 @@ def _sanitize_distance(km) -> float:
     return sanitize_distance_km(km)
 
 
+def _tariff_snapshot_from_settings(s) -> dict:
+    """get_tariff bilan mos: admin/DB tariff + kutish narxi."""
+    return {"base": int(s.min_price), "km": int(s.price_per_km), "wait": int(s.price_per_min_waiting)}
+
+
+async def _ensure_trip_state_for_order_start(
+    redis,
+    order_id: int,
+    driver_id: int,
+    db: AsyncSession,
+) -> None:
+    """Safar boshlanganda Redis trip_state — mavjud bo'lsa qayta yozilmaydi."""
+    if redis is None:
+        return
+    if get_trip_state(redis, order_id) is not None:
+        return
+    s = await get_settings(db)
+    now = time.time()
+    state = {
+        "driver_id": driver_id,
+        "status": "trip",
+        "distance_km": 0.0,
+        "waiting_seconds": 0.0,
+        "is_waiting": False,
+        "last_lat": None,
+        "last_lng": None,
+        "last_ts": None,
+        "last_speed_kmh": 0,
+        "trip_started_ts": now,
+        "pause_started_ts": None,
+        "tariff_snapshot": _tariff_snapshot_from_settings(s),
+        "updated_at": now,
+    }
+    set_trip_state(redis, order_id, state)
+
+
 @router.get("/tariff")
 async def get_tariff(db: AsyncSession = Depends(get_db)):
     """Taximeter uchun tarif (startPrice, pricePerKm, pricePerMinWaiting, minDistanceUpdate)."""
@@ -56,7 +97,7 @@ async def get_tariff(db: AsyncSession = Depends(get_db)):
     return {
         "startPrice": int(s.min_price),
         "pricePerKm": int(s.price_per_km),
-        "pricePerMinWaiting": 500,
+        "pricePerMinWaiting": int(s.price_per_min_waiting),
         "minDistanceUpdate": 0.02,
         "surge_multiplier": s.surge_multiplier,
         "is_surge_active": s.is_surge_active,
@@ -200,6 +241,9 @@ async def update_order_status(
 
         # Idempotent: takroriy "completed" — komissiya va xabarlar qayta ishlamaydi
         if new_status.lower() == "completed" and str(cur_status).lower() == "completed":
+            r_clean = get_redis()
+            if r_clean is not None:
+                delete_trip_state(r_clean, order_id)
             logger.info(f"📱 WebApp: Order {order_id} allaqachon completed — idempotent javob")
             return {"success": True, "status": "completed", "idempotent": True}
 
@@ -239,17 +283,39 @@ async def update_order_status(
 
         resolved_final: Optional[float] = None
         if mapped_status == OrderStatus.COMPLETED:
-            # Narx faqat taksometr (WebApp) dan — server qayta hisoblamaydi
-            resolved_final = parse_client_final_price(final_price)
-            if resolved_final is None:
-                raise HTTPException(
-                    status_code=400,
-                    detail="final_price kerak: taksometr yakuniy narxi (musbat son) query parametri sifatida yuborilishi shart.",
-                )
-            if distance_km is not None:
-                sanitized_dist = sanitize_distance_km(distance_km)
+            r_ts = get_redis()
+            trip_st = get_trip_state(r_ts, order_id) if r_ts else None
+            s_cfg = await get_settings(db)
+            snap_fb = _tariff_snapshot_from_settings(s_cfg)
+
+            if trip_st is not None:
+                d_km = _sanitize_distance(float(trip_st.get("distance_km") or 0))
+                w_sec = float(trip_st.get("waiting_seconds") or 0)
+                tariff = trip_st.get("tariff_snapshot") or snap_fb
+                computed = compute_fare(tariff, d_km, w_sec)
+                resolved_final = float(computed)
+                sanitized_dist = d_km
+                if final_price is not None:
+                    cp = parse_client_final_price(final_price)
+                    if cp is not None:
+                        verify_final_price(cp, computed)
             else:
-                sanitized_dist = float(getattr(order, "distance_km", None) or 0.0)
+                if distance_km is not None:
+                    d_src = distance_km
+                else:
+                    d_src = float(getattr(order, "distance_km", None) or 0.0)
+                d_km = _sanitize_distance(d_src)
+                computed = compute_fare(snap_fb, d_km, 0.0)
+                resolved_final = float(computed)
+                sanitized_dist = d_km
+                logger.warning(
+                    "Trip complete: Redis trip_state yo'q — server narxi tariff + DB masofa (kutish 0) "
+                    f"(order_id={order_id})"
+                )
+                if final_price is not None:
+                    cp = parse_client_final_price(final_price)
+                    if cp is not None:
+                        verify_final_price(cp, computed)
 
         updated_order = await OrderCRUD.update_status(
             db,
@@ -262,6 +328,16 @@ async def update_order_status(
             trip_start_lat=trip_lat,
             trip_start_lon=trip_lon,
         )
+
+        if apply_taximeter_start and updated_order:
+            r0 = get_redis()
+            if r0 is not None:
+                await _ensure_trip_state_for_order_start(r0, order_id, driver_id, db)
+
+        if mapped_status in (OrderStatus.COMPLETED, OrderStatus.CANCELLED) and updated_order:
+            r1 = get_redis()
+            if r1 is not None:
+                delete_trip_state(r1, order_id)
 
         # Safar yakunlanganda komissiya ayirish va xabarlar + FSM ni tozalab, mijozni bosh menyuga qaytarish
         if mapped_status == OrderStatus.COMPLETED and updated_order:
@@ -479,6 +555,128 @@ async def driver_arrived(
         return JSONResponse({"ok": False, "detail": str(e)})
 
 
+@router.post("/order/{order_id}/trip/pause")
+async def trip_pause(
+    order_id: int,
+    token: Optional[str] = Header(None, alias="X-WebApp-Token"),
+    qtoken: Optional[str] = Query(None, alias="token"),
+    db: AsyncSession = Depends(get_db),
+):
+    """Safarni pauza (kutish): Redis trip_state — takroriy chaqiriq xavfsiz."""
+    t = token or qtoken
+    if not t:
+        raise HTTPException(status_code=403, detail="WebApp token required")
+    data = verify_webapp_token(t, order_id)
+    if not data:
+        raise HTTPException(status_code=403, detail="Invalid or expired WebApp token")
+    _, driver_id = data
+    order = await OrderCRUD.get_by_id(db, order_id)
+    if not order or getattr(order, "driver_id", None) != driver_id:
+        raise HTTPException(status_code=403, detail="Access denied")
+    redis = get_redis()
+    if redis is None:
+        raise HTTPException(status_code=503, detail="Redis unavailable")
+    st = get_trip_state(redis, order_id)
+    if not st:
+        return {"ok": True, "active": False}
+    if int(st.get("driver_id") or 0) != driver_id:
+        raise HTTPException(status_code=403, detail="Access denied")
+    if st.get("pause_started_ts") is not None:
+        return {"ok": True, "idempotent": True}
+    now = time.time()
+    st["is_waiting"] = True
+    st["pause_started_ts"] = now
+    st["updated_at"] = now
+    set_trip_state(redis, order_id, st)
+    return {"ok": True}
+
+
+@router.post("/order/{order_id}/trip/resume")
+async def trip_resume(
+    order_id: int,
+    token: Optional[str] = Header(None, alias="X-WebApp-Token"),
+    qtoken: Optional[str] = Query(None, alias="token"),
+    db: AsyncSession = Depends(get_db),
+):
+    """Pauzadan chiqish: to'xtagan vaqtni waiting_seconds ga qo'shadi (idempotent)."""
+    t = token or qtoken
+    if not t:
+        raise HTTPException(status_code=403, detail="WebApp token required")
+    data = verify_webapp_token(t, order_id)
+    if not data:
+        raise HTTPException(status_code=403, detail="Invalid or expired WebApp token")
+    _, driver_id = data
+    order = await OrderCRUD.get_by_id(db, order_id)
+    if not order or getattr(order, "driver_id", None) != driver_id:
+        raise HTTPException(status_code=403, detail="Access denied")
+    redis = get_redis()
+    if redis is None:
+        raise HTTPException(status_code=503, detail="Redis unavailable")
+    st = get_trip_state(redis, order_id)
+    if not st:
+        return {"ok": True, "active": False}
+    if int(st.get("driver_id") or 0) != driver_id:
+        raise HTTPException(status_code=403, detail="Access denied")
+    if st.get("pause_started_ts") is None:
+        return {"ok": True, "idempotent": True}
+    now = time.time()
+    paused = float(now) - float(st["pause_started_ts"])
+    if paused > 0:
+        st["waiting_seconds"] = float(st.get("waiting_seconds") or 0) + paused
+    st["is_waiting"] = False
+    st["pause_started_ts"] = None
+    st["updated_at"] = now
+    set_trip_state(redis, order_id, st)
+    return {"ok": True}
+
+
+@router.get("/order/{order_id}/trip-meter")
+async def trip_meter(
+    order_id: int,
+    token: Optional[str] = Header(None, alias="X-WebApp-Token"),
+    qtoken: Optional[str] = Query(None, alias="token"),
+    db: AsyncSession = Depends(get_db),
+):
+    """Faol safar o'lchovi: Redis + server compute_fare (klientga ishonilmaydi)."""
+    t = token or qtoken
+    if not t:
+        raise HTTPException(status_code=403, detail="WebApp token required")
+    data = verify_webapp_token(t, order_id)
+    if not data:
+        raise HTTPException(status_code=403, detail="Invalid or expired WebApp token")
+    _, driver_id = data
+    order = await OrderCRUD.get_by_id(db, order_id)
+    if not order or getattr(order, "driver_id", None) != driver_id:
+        raise HTTPException(status_code=403, detail="Access denied")
+    redis = get_redis()
+    empty = {
+        "active": False,
+        "distance_km": 0.0,
+        "waiting_seconds": 0.0,
+        "estimated_fare": None,
+        "is_waiting": False,
+        "status": None,
+    }
+    if redis is None:
+        return empty
+    st = get_trip_state(redis, order_id)
+    if not st or int(st.get("driver_id") or 0) != driver_id:
+        return empty
+    snap = st.get("tariff_snapshot")
+    if not snap:
+        s = await get_settings(db)
+        snap = _tariff_snapshot_from_settings(s)
+    est = compute_fare(snap, float(st.get("distance_km") or 0), float(st.get("waiting_seconds") or 0))
+    return {
+        "active": True,
+        "distance_km": float(st.get("distance_km") or 0),
+        "waiting_seconds": float(st.get("waiting_seconds") or 0),
+        "estimated_fare": int(est),
+        "is_waiting": bool(st.get("is_waiting")),
+        "status": st.get("status"),
+    }
+
+
 class UpdateDriverLocationBody(BaseModel):
     driver_id: int
     latitude: float
@@ -553,7 +751,14 @@ async def update_driver_location_api(
                 },
             )
             # Snapped koordinata orders jadvaliga ham yoziladi (mijoz sahifasi uchun)
-            if body.order_id is not None and body.snapped_latitude is not None:
+            oid_for_snap = body.order_id
+            if oid_for_snap is None and redis is not None:
+                _ongoing = await OrderCRUD.get_ongoing_order_for_driver(db, body.driver_id)
+                if _ongoing:
+                    _st = _ongoing.status.value if hasattr(_ongoing.status, "value") else _ongoing.status
+                    if str(_st).lower() == "in_progress":
+                        oid_for_snap = _ongoing.id
+            if oid_for_snap is not None and body.snapped_latitude is not None:
                 await db.execute(
                     text("""
                         UPDATE orders
@@ -563,11 +768,29 @@ async def update_driver_location_api(
                     {
                         "slat": body.snapped_latitude,
                         "slon": body.snapped_longitude,
-                        "order_id": body.order_id,
+                        "order_id": oid_for_snap,
                     }
                 )
-        # Taksometr: in_progress buyurtmada har nuqta (throttle dan mustaqil) masofaga qo'shiladi
-        await accumulate_order_distance_for_driver(db, body.driver_id, store_lat, store_lon)
+        oid = body.order_id
+        if oid is None and redis is not None:
+            ongoing = await OrderCRUD.get_ongoing_order_for_driver(db, body.driver_id)
+            if ongoing:
+                st_ord = ongoing.status.value if hasattr(ongoing.status, "value") else ongoing.status
+                if str(st_ord).lower() == "in_progress":
+                    oid = ongoing.id
+        if redis is not None and oid is not None:
+            st = get_trip_state(redis, oid)
+            if st and int(st.get("driver_id") or 0) == body.driver_id:
+                now_ts = time.time()
+                st_after = update_distance(st, store_lat, store_lon, now_ts)
+                st_after["is_waiting"] = st_after.get("pause_started_ts") is not None
+                st_after["updated_at"] = now_ts
+                set_trip_state(redis, oid, st_after)
+        elif oid is not None:
+            logger.warning(
+                f"Redis unavailable during active trip GPS update — skipping taximeter "
+                f"(driver={body.driver_id}, order={oid})"
+            )
         await db.commit()
     except Exception as ex:
         # Redis ishlasa ham, DB throttle yangilashda xato bo‘lsa matching vaqtincha ishlamasligi mumkin.

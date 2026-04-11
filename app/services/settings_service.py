@@ -28,6 +28,7 @@ class TariffSettings:
     cashback_percent: float
     max_bonus_usage_percent: float
     max_bonus_cap: float  # Absolyut limit: bir safardan ishlatiladigan maks bonus (so'm)
+    price_per_min_waiting: float = 500.0
 
     def to_dict(self) -> dict:
         return {
@@ -39,6 +40,7 @@ class TariffSettings:
             "cashback_percent": self.cashback_percent,
             "max_bonus_usage_percent": self.max_bonus_usage_percent,
             "max_bonus_cap": self.max_bonus_cap,
+            "price_per_min_waiting": self.price_per_min_waiting,
         }
 
 
@@ -53,6 +55,7 @@ def _default_settings() -> TariffSettings:
         cashback_percent=0.0,
         max_bonus_usage_percent=0.0,
         max_bonus_cap=5000.0,
+        price_per_min_waiting=500.0,
     )
 
 
@@ -66,6 +69,7 @@ def _settings_from_dict(data: dict) -> TariffSettings:
         cashback_percent=float(data.get("cashback_percent", 0.0)),
         max_bonus_usage_percent=float(data.get("max_bonus_usage_percent", 0.0)),
         max_bonus_cap=float(data.get("max_bonus_cap", 5000.0)),
+        price_per_min_waiting=float(data.get("price_per_min_waiting", 500.0)),
     )
 
 
@@ -91,7 +95,8 @@ async def get_settings(db: AsyncSession | None = None) -> TariffSettings:
             row = await db.execute(
                 text(
                     "SELECT min_price, price_per_km, commission_rate, surge_multiplier, is_surge_active, "
-                    "cashback_percent, max_bonus_usage_percent, max_bonus_cap FROM settings WHERE id = 1"
+                    "cashback_percent, max_bonus_usage_percent, max_bonus_cap, "
+                    "COALESCE(price_per_min_waiting, 500) FROM settings WHERE id = 1"
                 )
             )
             r = row.fetchone()
@@ -105,6 +110,7 @@ async def get_settings(db: AsyncSession | None = None) -> TariffSettings:
                     cashback_percent=float(r[5] or 0.0),
                     max_bonus_usage_percent=float(r[6] or 0.0),
                     max_bonus_cap=float(r[7] or 5000.0),
+                    price_per_min_waiting=float(r[8] or 500.0),
                 )
                 redis = get_redis()
                 if redis is not None:
@@ -134,6 +140,7 @@ async def update_settings(
     cashback_percent: Optional[float] = None,
     max_bonus_usage_percent: Optional[float] = None,
     max_bonus_cap: Optional[float] = None,
+    price_per_min_waiting: Optional[float] = None,
     admin_user_id: Optional[int] = None,
 ) -> TariffSettings:
     """
@@ -164,6 +171,8 @@ async def update_settings(
         updates["max_bonus_usage_percent"] = max_bonus_usage_percent
     if max_bonus_cap is not None:
         updates["max_bonus_cap"] = max_bonus_cap
+    if price_per_min_waiting is not None:
+        updates["price_per_min_waiting"] = price_per_min_waiting
 
     if not updates:
         return current
@@ -174,11 +183,11 @@ async def update_settings(
             """
             INSERT INTO settings (
                 id, min_price, price_per_km, commission_rate, surge_multiplier, is_surge_active,
-                cashback_percent, max_bonus_usage_percent, max_bonus_cap
+                cashback_percent, max_bonus_usage_percent, max_bonus_cap, price_per_min_waiting
             )
             VALUES (
                 1, :min_price, :price_per_km, :commission_rate, :surge_multiplier, :is_surge_active,
-                :cashback_percent, :max_bonus_usage_percent, :max_bonus_cap
+                :cashback_percent, :max_bonus_usage_percent, :max_bonus_cap, :price_per_min_waiting
             )
             ON CONFLICT (id) DO UPDATE SET
                 min_price = EXCLUDED.min_price,
@@ -189,6 +198,7 @@ async def update_settings(
                 cashback_percent = EXCLUDED.cashback_percent,
                 max_bonus_usage_percent = EXCLUDED.max_bonus_usage_percent,
                 max_bonus_cap = EXCLUDED.max_bonus_cap,
+                price_per_min_waiting = EXCLUDED.price_per_min_waiting,
                 updated_at = CURRENT_TIMESTAMP
         """
         ),
