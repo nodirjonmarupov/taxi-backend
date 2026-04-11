@@ -3,9 +3,9 @@ Order modeli
 """
 from datetime import datetime
 from enum import Enum as PyEnum
-from typing import Optional
+from typing import Any, Optional
 
-from sqlalchemy import Integer, String, Float, DateTime, ForeignKey, Numeric, func, Boolean
+from sqlalchemy import Integer, String, Float, DateTime, ForeignKey, Numeric, func, Boolean, JSON
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.database import Base
@@ -67,6 +67,9 @@ class Order(Base):
     # Buyurtma yaratilganda muzlatilgan bonus (bekor bo'lsa qaytariladi)
     frozen_bonus: Mapped[float] = mapped_column(Numeric(10, 2), default=0.0, nullable=False)
     used_bonus: Mapped[float] = mapped_column(Numeric(10, 2), default=0.0, nullable=False)
+
+    # Muzlatilgan tariff (audit): Redis yo'qolganda ham billing mosligi uchun
+    tariff_snapshot_json: Mapped[Optional[Any]] = mapped_column(JSON, nullable=True)
 
     user: Mapped["User"] = relationship("User", back_populates="orders", lazy="selectin")
     driver: Mapped[Optional["Driver"]] = relationship("Driver", back_populates="orders", lazy="selectin")

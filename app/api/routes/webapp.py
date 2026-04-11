@@ -23,7 +23,9 @@ from app.crud.user import UserCRUD, DriverCRUD
 from app.services.settings_service import get_settings
 from app.utils.trip_finish import sanitize_distance_km, parse_client_final_price
 from app.services.taximeter_service import (
+    billing_fallback_tariff_no_stored_snapshot,
     compute_fare,
+    resolve_effective_surge_multiplier,
     update_distance,
     verify_final_price,
 )
@@ -53,9 +55,18 @@ def _sanitize_distance(km) -> float:
     return sanitize_distance_km(km)
 
 
-def _tariff_snapshot_from_settings(s) -> dict:
-    """get_tariff bilan mos: admin/DB tariff + kutish narxi."""
-    return {"base": int(s.min_price), "km": int(s.price_per_km), "wait": int(s.price_per_min_waiting)}
+def _tariff_snapshot_from_settings(s, at: Optional[datetime] = None) -> dict:
+    """get_tariff bilan mos: tariff + muzlatilgan surge (vaqt va admin max qoidasi)."""
+    if at is None:
+        at = datetime.now()
+    surge = resolve_effective_surge_multiplier(s, at)
+    return {
+        "base": int(s.min_price),
+        "km": int(s.price_per_km),
+        "wait": int(s.price_per_min_waiting),
+        "surge_multiplier": surge,
+        "tariff_version": 1,
+    }
 
 
 async def _ensure_trip_state_for_order_start(
@@ -92,14 +103,15 @@ async def _ensure_trip_state_for_order_start(
 @router.get("/tariff")
 async def get_tariff(db: AsyncSession = Depends(get_db)):
     """Taximeter uchun tarif (startPrice, pricePerKm, pricePerMinWaiting, minDistanceUpdate)."""
-    from app.services.settings_service import get_settings
     s = await get_settings(db)
+    at = datetime.now()
+    eff_surge = resolve_effective_surge_multiplier(s, at)
     return {
         "startPrice": int(s.min_price),
         "pricePerKm": int(s.price_per_km),
         "pricePerMinWaiting": int(s.price_per_min_waiting),
         "minDistanceUpdate": 0.02,
-        "surge_multiplier": s.surge_multiplier,
+        "surge_multiplier": eff_surge,
         "is_surge_active": s.is_surge_active,
     }
 
@@ -282,19 +294,28 @@ async def update_order_status(
                 trip_lat, trip_lon = None, None
 
         resolved_final: Optional[float] = None
+        tariff_snapshot_for_db: Optional[dict] = None
         if mapped_status == OrderStatus.COMPLETED:
             r_ts = get_redis()
             trip_st = get_trip_state(r_ts, order_id) if r_ts else None
-            s_cfg = await get_settings(db)
-            snap_fb = _tariff_snapshot_from_settings(s_cfg)
 
             if trip_st is not None:
                 d_km = _sanitize_distance(float(trip_st.get("distance_km") or 0))
                 w_sec = float(trip_st.get("waiting_seconds") or 0)
-                tariff = trip_st.get("tariff_snapshot") or snap_fb
+                tariff = trip_st.get("tariff_snapshot")
+                if not tariff:
+                    tariff = getattr(order, "tariff_snapshot_json", None)
+                if not tariff:
+                    s_cfg = await get_settings(db)
+                    tariff = billing_fallback_tariff_no_stored_snapshot(
+                        int(s_cfg.min_price),
+                        int(s_cfg.price_per_km),
+                        int(s_cfg.price_per_min_waiting),
+                    )
                 computed = compute_fare(tariff, d_km, w_sec)
                 resolved_final = float(computed)
                 sanitized_dist = d_km
+                tariff_snapshot_for_db = tariff
                 if final_price is not None:
                     cp = parse_client_final_price(final_price)
                     if cp is not None:
@@ -305,11 +326,21 @@ async def update_order_status(
                 else:
                     d_src = float(getattr(order, "distance_km", None) or 0.0)
                 d_km = _sanitize_distance(d_src)
-                computed = compute_fare(snap_fb, d_km, 0.0)
+                tariff = getattr(order, "tariff_snapshot_json", None)
+                if not tariff:
+                    s_cfg = await get_settings(db)
+                    tariff = billing_fallback_tariff_no_stored_snapshot(
+                        int(s_cfg.min_price),
+                        int(s_cfg.price_per_km),
+                        int(s_cfg.price_per_min_waiting),
+                    )
+                computed = compute_fare(tariff, d_km, 0.0)
                 resolved_final = float(computed)
                 sanitized_dist = d_km
+                tariff_snapshot_for_db = tariff
                 logger.warning(
-                    "Trip complete: Redis trip_state yo'q — server narxi tariff + DB masofa (kutish 0) "
+                    "Trip complete: Redis trip_state yo'q — billing: DB tariff_snapshot yoki "
+                    "surge=1.0 fallback + DB masofa (kutish 0) "
                     f"(order_id={order_id})"
                 )
                 if final_price is not None:
@@ -327,6 +358,9 @@ async def update_order_status(
             apply_taximeter_start=apply_taximeter_start,
             trip_start_lat=trip_lat,
             trip_start_lon=trip_lon,
+            tariff_snapshot_json=tariff_snapshot_for_db
+            if mapped_status == OrderStatus.COMPLETED
+            else None,
         )
 
         if apply_taximeter_start and updated_order:
@@ -664,8 +698,12 @@ async def trip_meter(
         return empty
     snap = st.get("tariff_snapshot")
     if not snap:
+        snap = getattr(order, "tariff_snapshot_json", None)
+    if not snap:
         s = await get_settings(db)
-        snap = _tariff_snapshot_from_settings(s)
+        snap = billing_fallback_tariff_no_stored_snapshot(
+            int(s.min_price), int(s.price_per_km), int(s.price_per_min_waiting)
+        )
     est = compute_fare(snap, float(st.get("distance_km") or 0), float(st.get("waiting_seconds") or 0))
     return {
         "active": True,

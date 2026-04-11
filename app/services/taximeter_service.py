@@ -7,8 +7,9 @@ DB bilan ishlash: accumulate_order_distance_for_driver.
 from __future__ import annotations
 
 from copy import deepcopy
+from datetime import datetime
 from decimal import Decimal, ROUND_HALF_UP
-from typing import Any, Dict, Union
+from typing import Any, Dict, Optional, Union
 
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -27,7 +28,58 @@ WAITING_SPEED_KMH = 5.0
 DEFAULT_ROUND_STEP_SOM = Decimal("100")
 PRICE_TOLERANCE = Decimal("0.02")
 
+# Time-based surge floor: 22:00–06:00 (server local time, naive datetime).
+TIME_SURGE_NIGHT_MIN = 1.2
+SURGE_CAP_MIN = 1.0
+SURGE_CAP_MAX = 2.0
+
 _engine_log = get_logger(__name__)
+
+
+def _time_based_surge_component(at: datetime) -> float:
+    """Night window uses minimum surge 1.2x; daytime component is 1.0."""
+    h = at.hour
+    if h >= 22 or h < 6:
+        return float(TIME_SURGE_NIGHT_MIN)
+    return 1.0
+
+
+def resolve_effective_surge_multiplier(settings: Any, at: Optional[datetime] = None) -> float:
+    """
+    Single billing surge: max(admin_manual, time_based), clamped to [1.0, 2.0]. No stacking.
+
+    - Admin manual: settings.surge_multiplier when is_surge_active, else 1.0 (manual floored at 1.0).
+    - Time-based: 1.2 during 22:00–06:00 local server time, else 1.0.
+    - effective = max(manual, time_component), then clamp to SURGE_CAP_MIN..SURGE_CAP_MAX.
+    """
+    if at is None:
+        at = datetime.now()
+    if getattr(settings, "is_surge_active", False):
+        manual = float(getattr(settings, "surge_multiplier", 1.0) or 1.0)
+        if manual < 1.0:
+            manual = 1.0
+    else:
+        manual = 1.0
+    time_comp = _time_based_surge_component(at)
+    eff = max(manual, time_comp)
+    eff = max(SURGE_CAP_MIN, min(SURGE_CAP_MAX, eff))
+    return float(eff)
+
+
+def billing_fallback_tariff_no_stored_snapshot(
+    min_price: int, price_per_km: int, price_per_min_waiting: int,
+) -> Dict[str, Any]:
+    """
+    When Redis and DB have no frozen snapshot: use current line-item prices but surge=1.0 only
+    (no live surge) so billing does not jump to admin night/manual surge.
+    """
+    return {
+        "base": int(min_price),
+        "km": int(price_per_km),
+        "wait": int(price_per_min_waiting),
+        "surge_multiplier": 1.0,
+        "tariff_version": 1,
+    }
 
 
 def compute_fare(
@@ -37,16 +89,22 @@ def compute_fare(
     round_to: Decimal = DEFAULT_ROUND_STEP_SOM,
 ) -> Decimal:
     """
-    Total = Base + (distance_km * km_price) + (waiting_seconds / 60 * wait_price).
-    All money as Decimal; result rounded to nearest round_to (default 100 so'm).
+    Billing (frozen tariff_snapshot per trip, Decimal math):
+      subtotal = base + (distance_km * km_price) + (waiting_seconds / 60 * wait_price)
+      total = subtotal * surge_multiplier   # from snapshot, default 1; surge clamped [1,2] here
+    Then round to round_to (default 100 so'm).
     """
     base = Decimal(str(tariff_snapshot.get("base", 0)))
     km_p = Decimal(str(tariff_snapshot.get("km", 0)))
     wait_p = Decimal(str(tariff_snapshot.get("wait", 0)))
+    surge = Decimal(str(tariff_snapshot.get("surge_multiplier", 1)))
+    surge = max(Decimal("1.0"), surge)
+    surge = min(Decimal("2.0"), surge)
     d_km = Decimal(str(distance_km))
     w_sec = Decimal(str(waiting_seconds))
 
-    total = base + (d_km * km_p) + ((w_sec / Decimal("60")) * wait_p)
+    subtotal = base + (d_km * km_p) + ((w_sec / Decimal("60")) * wait_p)
+    total = subtotal * surge
     if round_to <= 0:
         return total
     q = (total / round_to).quantize(Decimal("1"), rounding=ROUND_HALF_UP) * round_to

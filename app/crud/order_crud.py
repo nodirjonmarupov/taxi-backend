@@ -2,7 +2,7 @@
 Order modeli uchun CRUD amallari.
 Barcha funksiyalar OrderCRUD klassi ichiga jamlangan.
 """
-from typing import Optional, List
+from typing import Any, Optional, List
 from datetime import datetime, timedelta
 from sqlalchemy import select, update, func, text
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -94,6 +94,7 @@ class OrderCRUD:
         apply_taximeter_start: bool = False,
         trip_start_lat: Optional[float] = None,
         trip_start_lon: Optional[float] = None,
+        tariff_snapshot_json: Optional[Any] = None,
     ) -> Optional[Order]:
         """Buyurtma holatini yangilash. distance_km > 1000 bo'lsa 0 saqlanadi."""
         update_data = {"status": status}
@@ -114,6 +115,8 @@ class OrderCRUD:
                 update_data["distance_km"] = 0.0 if distance_km > 1000 else distance_km
             if final_price is not None:
                 update_data["final_price"] = final_price
+            if tariff_snapshot_json is not None:
+                update_data["tariff_snapshot_json"] = tariff_snapshot_json
         elif status == OrderStatus.CANCELLED:
             update_data["cancelled_at"] = datetime.utcnow()
 
