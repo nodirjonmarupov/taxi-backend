@@ -816,7 +816,7 @@ function refreshDistanceDisplay() {
         d = haversineM(lastDriverLocation.lat, lastDriverLocation.lon, ORDER_DATA.pickup_latitude, ORDER_DATA.pickup_longitude) / 1000;
     }
     if (routeRoadDistanceKm != null && routeRoadDistanceKm > 0) d = routeRoadDistanceKm;
-    if (d > MAX_DISTANCE_KM || d < 0 || isNaN(d)) { distEl.textContent = '0.00'; timeEl.textContent = '??; return; }
+    if (d > MAX_DISTANCE_KM || d < 0 || isNaN(d)) { distEl.textContent = '0.00'; timeEl.textContent = '??'; return; }
     distEl.textContent = d.toFixed(2);
     timeEl.textContent = '~' + Math.max(1, Math.round(d / AVG_SPEED_KMH * 60));
 }
@@ -988,9 +988,9 @@ function onGeoError(error) {
     hideGpsModal();
     var eo = document.getElementById('errorOverlay'); if (eo) { eo.classList.remove('visible'); }
     var el = document.getElementById('distanceToClient');
-    if (el) el.textContent = '??;
+    if (el) el.textContent = '??';
     el = document.getElementById('timeToClient');
-    if (el) el.textContent = '??;
+    if (el) el.textContent = '??';
     document.getElementById('loading').classList.add('hidden');
     if (map && ORDER_DATA && isValidCoord(ORDER_DATA.pickup_latitude, ORDER_DATA.pickup_longitude)) {
         map.easeTo({
@@ -1004,9 +1004,9 @@ function onGeoError(error) {
 function showGpsError(msg) {
     intervals.position = null;
     var el = document.getElementById('distanceToClient');
-    if (el) el.textContent = '??;
+    if (el) el.textContent = '??';
     el = document.getElementById('timeToClient');
-    if (el) el.textContent = '??;
+    if (el) el.textContent = '??';
     document.getElementById('loading').classList.add('hidden');
     showGpsModal();
 }
@@ -1230,8 +1230,8 @@ function updateDriverMarker(lat, lng, heading) {
                 if (d > MAX_DISTANCE_KM || d < 0 || isNaN(d)) d = 0;
                 var distEl = document.getElementById('distanceToClient');
                 var timeEl = document.getElementById('timeToClient');
-                if (distEl) distEl.textContent = d > MAX_DISTANCE_KM ? '?? : d.toFixed(2);
-                if (timeEl) timeEl.textContent = d > MAX_DISTANCE_KM ? '?? : '~' + Math.max(1, Math.round(d / AVG_SPEED_KMH * 60));
+                if (distEl) distEl.textContent = d > MAX_DISTANCE_KM ? '0.00' : d.toFixed(2);
+                if (timeEl) timeEl.textContent = d > MAX_DISTANCE_KM ? '??' : '~' + Math.max(1, Math.round(d / AVG_SPEED_KMH * 60));
             }
         }
         if (appState === 'trip' && !tripData.isWaiting) {
@@ -1256,7 +1256,7 @@ function startSim() {
     if (simOn || !routeCoordinates.length) return;
     simOn = true;
     var lbl = document.getElementById('sim-lbl');
-    if (lbl) lbl.textContent = '??;
+    if (lbl) lbl.textContent = '??';
     simIdx = 0;
     addDriverMarker(routeCoordinates[0].lat || routeCoordinates[0][0], routeCoordinates[0].lng || routeCoordinates[0][1]);
     tLat = routeCoordinates[0].lat || routeCoordinates[0][0];
@@ -1272,7 +1272,7 @@ function stopSim() {
     simOn = false;
     clearInterval(simTmr);
     var lbl = document.getElementById('sim-lbl');
-    if (lbl) lbl.textContent = '??;
+    if (lbl) lbl.textContent = '??';
 }
 function toggleSim() { simOn ? stopSim() : startSim(); }
 function tick() {
