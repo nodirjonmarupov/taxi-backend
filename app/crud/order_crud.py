@@ -110,7 +110,9 @@ class OrderCRUD:
                     update_data["last_lon"] = trip_start_lon
                     update_data["distance_km"] = 0.0
         elif status == OrderStatus.COMPLETED:
-            update_data["finished_at"] = datetime.utcnow()
+            now = datetime.utcnow()
+            update_data["finished_at"] = now
+            update_data["completed_at"] = now
             if distance_km is not None:
                 update_data["distance_km"] = 0.0 if distance_km > 1000 else distance_km
             if final_price is not None:
