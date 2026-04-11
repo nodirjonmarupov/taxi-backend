@@ -149,7 +149,7 @@ class AdminLoginResponse(BaseModel):
 @admin_router.post("/login", response_model=AdminLoginResponse)
 async def admin_login(body: AdminLoginRequest, db: AsyncSession = Depends(get_db)):
     """Admin login: phone yoki telegram_id + parol. User is_admin=True va is_active=True bo'lishi kerak."""
-    if config.ADMIN_PASSWORD and body.password != config.ADMIN_PASSWORD:
+    if body.password != config.ADMIN_PASSWORD:
         raise HTTPException(status_code=401, detail="Invalid credentials")
     user = None
     if body.phone:
@@ -311,16 +311,20 @@ class SettingsResponse(BaseModel):
     is_surge_active: bool
     cashback_percent: float
     max_bonus_usage_percent: float
+    max_bonus_cap: float
+    price_per_min_waiting: float
 
 
 class SettingsUpdateRequest(BaseModel):
-    min_price: Optional[float] = None
-    price_per_km: Optional[float] = None
-    commission_rate: Optional[float] = None
-    surge_multiplier: Optional[float] = None
+    min_price: Optional[float] = Field(None, ge=0)
+    price_per_km: Optional[float] = Field(None, ge=0)
+    commission_rate: Optional[float] = Field(None, ge=0, le=100)
+    surge_multiplier: Optional[float] = Field(None, ge=1.0, le=2.0)
     is_surge_active: Optional[bool] = None
-    cashback_percent: Optional[float] = None
-    max_bonus_usage_percent: Optional[float] = None
+    cashback_percent: Optional[float] = Field(None, ge=0, le=100)
+    max_bonus_usage_percent: Optional[float] = Field(None, ge=0, le=100)
+    max_bonus_cap: Optional[float] = Field(None, ge=0)
+    price_per_min_waiting: Optional[float] = Field(None, ge=0)
 
 
 @admin_router.get("/settings", response_model=SettingsResponse)
@@ -342,6 +346,8 @@ async def admin_get_settings(
             is_surge_active=False,
             cashback_percent=0.0,
             max_bonus_usage_percent=0.0,
+            max_bonus_cap=5000.0,
+            price_per_min_waiting=500.0,
         )
 
 
@@ -362,6 +368,8 @@ async def admin_update_settings(
             is_surge_active=body.is_surge_active,
             cashback_percent=body.cashback_percent,
             max_bonus_usage_percent=body.max_bonus_usage_percent,
+            max_bonus_cap=body.max_bonus_cap,
+            price_per_min_waiting=body.price_per_min_waiting,
             admin_user_id=admin.id,
         )
         return SettingsResponse(**s.to_dict())

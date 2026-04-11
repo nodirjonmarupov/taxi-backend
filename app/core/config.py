@@ -6,6 +6,8 @@ from typing import Optional, List
 from pydantic_settings import BaseSettings
 from pydantic import Field, field_validator
 
+_DEFAULT_SECRET_PLACEHOLDER = "change-this-secret-key-in-production"
+
 
 class Settings(BaseSettings):
     """Application settings loaded from environment variables."""
@@ -39,6 +41,30 @@ class Settings(BaseSettings):
     # Admin IDs - Telegram ID raqamlari (env: "878590210,8219777626" yoki "[878590210, 8219777626]")
     ADMIN_IDS: List[int] = [878590210, 8219777626]
 
+    @field_validator("SECRET_KEY")
+    @classmethod
+    def validate_secret_key(cls, v: str) -> str:
+        s = (v or "").strip()
+        if not s:
+            raise ValueError(
+                "SECRET_KEY cannot be empty or whitespace-only; set a strong value in .env"
+            )
+        if s == _DEFAULT_SECRET_PLACEHOLDER:
+            raise ValueError(
+                "SECRET_KEY cannot use the default placeholder; set a strong secret in .env"
+            )
+        return s
+
+    @field_validator("ADMIN_PASSWORD")
+    @classmethod
+    def validate_admin_password(cls, v: str) -> str:
+        s = (v or "").strip()
+        if not s:
+            raise ValueError(
+                "ADMIN_PASSWORD cannot be empty or whitespace-only; set it in .env"
+            )
+        return s
+
     @field_validator("ADMIN_IDS", mode="before")
     @classmethod
     def parse_admin_ids(cls, v):
@@ -52,10 +78,16 @@ class Settings(BaseSettings):
         return v
     # Admin ham haydovchi bo'lsa buyurtma oladi (tekshirish uchun True, ishlab chiqarishda False)
     ADMIN_CAN_RECEIVE_ORDERS: bool = True
-    ADMIN_PASSWORD: str = Field(default="2002nm2002")
-    
+    ADMIN_PASSWORD: str = Field(
+        ...,
+        description="Admin panel login password; must be set in environment (non-empty).",
+    )
+
     # Security
-    SECRET_KEY: str = Field(default="change-this-secret-key-in-production")
+    SECRET_KEY: str = Field(
+        ...,
+        description="JWT signing key; must be a strong secret, not the placeholder value.",
+    )
     ALGORITHM: str = "HS256"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 30
     
