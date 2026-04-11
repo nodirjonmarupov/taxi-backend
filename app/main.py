@@ -512,10 +512,19 @@ HTML_CONTENT = """
 
         let CLIENT_LOCATION = null;
         let lastDriverLocation = null;
+        let headingBuffer = [];
         let lastHeading = 0;
         let lastSentLocation = null;
         let lastSentTime = 0;
         const MIN_DISTANCE_M = 15;
+        const ROUTE_SNAP_MAX_M = 20;
+        const RAW_GPS_MIN_MOVE_M = 5;
+        const RAW_GPS_REF_FREEZE_MAX_KMH = 6;
+        const RAW_GPS_HOLD_MAX_KMH = 12;
+        const HEADING_BUFFER_MAX = 5;
+        const HEADING_BUFFER_RESET_DEG = 30;
+        const PREDICT_AHEAD_MIN_S = 0.3;
+        const PREDICT_AHEAD_MAX_S = 0.5;
         const THROTTLE_MS = 7000;
         let gpsErrorShown = false;
         let navAutoMode = true;
@@ -622,7 +631,7 @@ HTML_CONTENT = """
                 var d = haversineM(lat, lng, py, px); // metric distance — correct basis for comparison
                 if (d < bd) { bd = d; best = [py, px]; bestIdx = i; }
             }
-            if (best && bd < 500) return [best[0], best[1], bestIdx];
+            if (best && bd < ROUTE_SNAP_MAX_M) return [best[0], best[1], bestIdx];
             return [lat, lng, 0];
         }
         function getOffsetCenter(lat, lon, bearingDeg, meters) {
@@ -716,7 +725,13 @@ HTML_CONTENT = """
                 var _drScale = Math.min(Math.max((spd - 2) / 3, 0), 1);
                 if (_gpsAnchorLat !== null && _drScale > 0) {
                     var _drSec = Math.min((_nowMs - _gpsAnchorMs) / 1000, 2.5);
-                    var _drDist = (spd / 3.6) * _drSec * _drScale; // meters to extrapolate
+                    var _aheadSec = 0;
+                    if (spd > 5) {
+                        _aheadSec = PREDICT_AHEAD_MIN_S + (PREDICT_AHEAD_MAX_S - PREDICT_AHEAD_MIN_S) *
+                            Math.min((spd - 5) / 30, 1);
+                    }
+                    var _drSecPred = Math.min(_drSec + _aheadSec, 2.9);
+                    var _drDist = (spd / 3.6) * _drSecPred * _drScale; // meters to extrapolate
                     // Route-based prediction: follows road geometry through curves.
                     // Falls back to spherical-bearing projection if no route loaded.
                     var _rp = advanceAlongRoute(_gpsAnchorLat, _gpsAnchorLng, _routeAnchorIdx, _drDist);
@@ -748,6 +763,12 @@ HTML_CONTENT = """
                             _predLng = _predSnap.geometry.coordinates[0];
                         }
                     } catch (_) {}
+                }
+                // Glue lookahead to smoothed marker position when moving (spd > 5): avoids jumps on irregular GPS.
+                if (spd > 5 && dLat !== null && dLng !== null && _predLat !== null) {
+                    var _predGlue = 0.07;
+                    _predLat += (dLat - _predLat) * _predGlue;
+                    _predLng += (dLng - _predLng) * _predGlue;
                 }
 
                 // updatePosition ─────────────────────────────────────────────────────────
@@ -1363,13 +1384,38 @@ HTML_CONTENT = """
                 }
                 var _prevSnappedLat = tLat, _prevSnappedLng = tLng;
                 var sl = lat, sa = lng;
-                if (typeof turf !== 'undefined' && _driverRouteLine && _driverRouteLine.geometry) {
+                var _speedForFreeze = (lastGpsSpeedKmh != null && !isNaN(lastGpsSpeedKmh) && lastGpsSpeedKmh > 0)
+                    ? lastGpsSpeedKmh : spd;
+                var _microMove = lastDriverLocation && lastDriverLocation.lat != null && lastDriverLocation.lon != null &&
+                    haversineM(lat, lng, lastDriverLocation.lat, lastDriverLocation.lon) < RAW_GPS_MIN_MOVE_M;
+                var _freezeGpsRef = _microMove && _speedForFreeze < RAW_GPS_REF_FREEZE_MAX_KMH &&
+                    tLat != null && tLng != null && driverMarker;
+                if (_freezeGpsRef) {
+                    sl = tLat;
+                    sa = tLng;
+                } else if (typeof turf !== 'undefined' && _driverRouteLine && _driverRouteLine.geometry) {
                     try {
                         var _snapPt = turf.point([lng, lat]);
+                        var _lineDistM = turf.pointToLineDistance(_snapPt, _driverRouteLine, { units: 'meters' });
                         var _snapRes = turf.nearestPointOnLine(_snapRouteLine || _driverRouteLine, _snapPt, { units: 'kilometers' });
+                        var _slNew = lat, _saNew = lng;
                         if (_snapRes && _snapRes.geometry && _snapRes.geometry.coordinates) {
-                            sa = _snapRes.geometry.coordinates[0]; // lon
-                            sl = _snapRes.geometry.coordinates[1]; // lat
+                            _saNew = _snapRes.geometry.coordinates[0];
+                            _slNew = _snapRes.geometry.coordinates[1];
+                        }
+                        var _offRouteSnap = _lineDistM > ROUTE_SNAP_MAX_M;
+                        var _holdM = RAW_GPS_MIN_MOVE_M;
+                        if (_speedForFreeze >= 6) _holdM = 3;
+                        if (_speedForFreeze >= 12) _holdM = 2;
+                        var _onRouteHold = !_offRouteSnap && _prevSnappedLat != null && _prevSnappedLng != null &&
+                            haversineM(_slNew, _saNew, _prevSnappedLat, _prevSnappedLng) < _holdM &&
+                            _speedForFreeze < RAW_GPS_HOLD_MAX_KMH;
+                        if (_onRouteHold) {
+                            sl = _prevSnappedLat;
+                            sa = _prevSnappedLng;
+                        } else if (_snapRes && _snapRes.geometry && _snapRes.geometry.coordinates) {
+                            sa = _saNew;
+                            sl = _slNew;
                             // Turf returns the exact segment index — use it directly.
                             // The old vertex-search loop found the nearest START node which is wrong
                             // when the projection point is near a segment's end (off-by-one → wrong DR).
@@ -1385,6 +1431,9 @@ HTML_CONTENT = """
                                 }
                             }
                             _firstSnapDone = true;
+                        } else {
+                            sl = _slNew;
+                            sa = _saNew;
                         }
                     } catch (_e) {
                         if (routeCoordinates && routeCoordinates.length >= 2) {
@@ -1418,7 +1467,9 @@ HTML_CONTENT = """
                 }
                 if (lastGpsSpeedKmh != null && !isNaN(lastGpsSpeedKmh) && lastGpsSpeedKmh > 0) speedKmh = lastGpsSpeedKmh;
                 lastPositionTime = now;
-                lastDriverLocation = { lat: lat, lon: lng };
+                if (!_freezeGpsRef) {
+                    lastDriverLocation = { lat: lat, lon: lng };
+                }
                 pLat = lat;
                 pLng = lng;
                 tLat = sl;
@@ -1476,6 +1527,7 @@ HTML_CONTENT = """
                         : ((_prevSnappedLat != null && _prevSnappedLng != null)
                             ? calcBearing(_prevSnappedLat, _prevSnappedLng, sl, sa) : brg);
                     brg = _initBrg;
+                    headingBuffer = [brg];
                     displayHeading = _initBrg;
                     displayBearing = _initBrg;
                     targetBearing = _initBrg;
@@ -1487,6 +1539,14 @@ HTML_CONTENT = """
                     var pickLon = ORDER_DATA.pickup_longitude;
                     if (pickLat != null && pickLon != null) drawRoute(driverPos, { lat: pickLat, lng: pickLon });
                     document.getElementById('loading').classList.add('hidden');
+                } else {
+                    var _brgPreBuf = brg;
+                    var _prevBufMean = headingBuffer.length ? circularMeanHeadings(headingBuffer) : _brgPreBuf;
+                    var _bufTurnDiff = Math.abs(((_brgPreBuf - _prevBufMean + 540) % 360) - 180);
+                    if (_bufTurnDiff > HEADING_BUFFER_RESET_DEG && speedKmh > 3) headingBuffer = [];
+                    headingBuffer.push(_brgPreBuf);
+                    if (headingBuffer.length > HEADING_BUFFER_MAX) headingBuffer.shift();
+                    brg = circularMeanHeadings(headingBuffer);
                 }
                 setTurnAndDistFromDriver(driverPos);
                 if (!routeCoordinates.length) {
