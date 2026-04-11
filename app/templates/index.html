@@ -1,0 +1,303 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="version" content="V25.0">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Timgo Taxi V25.0 - Professional Navigator</title>
+    
+    <script src="https://telegram.org/js/telegram-web-app.js?v=999"></script>
+    <link href="https://cdn.jsdelivr.net/npm/maplibre-gl@3.6.2/dist/maplibre-gl.css" rel="stylesheet"/>
+    
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        :root {
+            --uber-blue: #276EF1; --uber-dark: #000000; --uber-gray: #1A1A1A;
+            --uber-light: #FFFFFF; --uber-success: #05B169; --uber-warning: #FFB800; --uber-danger: #E8504D;
+        }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Inter", "Segoe UI", Roboto, sans-serif;
+            background: var(--uber-dark); color: var(--uber-light); overflow: hidden; height: 100vh; display: flex; flex-direction: column;
+        }
+        #map-container { position: relative; flex: 1; overflow: hidden; min-height: 0; }
+        #map-wrap {
+            position: absolute;
+            top: 0; left: 0; right: 0; bottom: 0;
+            z-index: 1;
+        }
+        #map { width: 100%; height: 100%; z-index: 1; padding-bottom: env(safe-area-inset-bottom); box-sizing: border-box; }
+        #map.minimized { height: 0vh; opacity: 0; display: none; }
+        .bottom-panel {
+            position: fixed; bottom: 0; left: 0; width: 100%;
+            background: rgba(0,0,0,0.85); backdrop-filter: blur(16px); -webkit-backdrop-filter: blur(16px);
+            padding: 16px 20px; padding-bottom: max(24px, env(safe-area-inset-bottom));
+            border-radius: 15px 15px 0 0;
+            border-top: 1px solid rgba(255,255,255,0.1); z-index: 1000; margin: 0; box-sizing: border-box;
+        }
+        .panel-handle { width: 40px; height: 4px; background: rgba(255, 255, 255, 0.2); border-radius: 2px; margin: 0 auto 20px; }
+        .distance-info { text-align: center; margin-bottom: 24px; }
+        .distance-label { font-size: 14px; color: rgba(255, 255, 255, 0.6); margin-bottom: 8px; text-transform: uppercase; }
+        .distance-value { font-size: 42px; font-weight: 800; color: var(--uber-light); line-height: 1; }
+        .taximeter-screen { display: none; background: var(--uber-dark); padding: 16px 20px 20px; height: 70vh; overflow-y: auto; }
+        .taximeter-screen.active {
+            display: block;
+            position: fixed;
+            inset: 0;
+            height: 100%;
+            z-index: 1002;
+            overflow-y: auto;
+        }
+        body.taximeter-mode #compassBtn,
+        body.taximeter-mode .maplibregl-ctrl-group,
+        body.taximeter-mode .maplibregl-ctrl-compass,
+        body.taximeter-mode .maplibregl-ctrl-zoom {
+            display: none !important;
+        }
+        .fare-display {
+            text-align: center; margin-bottom: 24px; padding: 24px 20px;
+            background: linear-gradient(135deg, #1e3c72 0%, #2a5298 100%); border-radius: 20px;
+        }
+        .fare-amount { font-size: 64px; font-weight: 900; color: var(--uber-light); line-height: 1; }
+        .stats-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-bottom: 24px; }
+        .stat-card { background: var(--uber-gray); padding: 20px; border-radius: 16px; border: 1px solid rgba(255, 255, 255, 0.1); }
+        .action-btn { width: 100%; padding: 18px; border: none; border-radius: 16px; font-size: 16px; font-weight: 700; cursor: pointer; margin-bottom: 12px; }
+        .btn-primary { background: var(--uber-blue); color: var(--uber-light); }
+        .btn-success { background: var(--uber-success); color: var(--uber-light); }
+        .btn-warning { background: var(--uber-warning); color: var(--uber-dark); }
+        .btn-danger { background: var(--uber-danger); color: var(--uber-light); }
+        .loading-overlay { position: fixed; inset: 0; background: var(--uber-dark); display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 16px; z-index: 9999; }
+        .loading-overlay.hidden { opacity: 0; pointer-events: none; }
+        .loading-overlay .load-text { font-size: 16px; color: rgba(255,255,255,0.9); }
+        .spinner { width: 50px; height: 50px; border: 4px solid rgba(255, 255, 255, 0.1); border-top: 4px solid var(--uber-blue); border-radius: 50%; animation: spin 1s linear infinite; }
+        @keyframes spin { to { transform: rotate(360deg); } }
+        .driver-marker { width: 40px; height: 40px; background: #dc3545; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 24px; border: 3px solid white; }
+        .client-marker { width: 40px; height: 40px; background: #276EF1; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 24px; border: 3px solid white; }
+        .leaflet-routing-container, .leaflet-control-attribution { display: none !important; }
+        .geo-warn-banner {
+            background: rgba(255, 184, 0, 0.95);
+            color: #1a1a1a;
+            padding: 12px 16px;
+            font-size: 14px;
+            font-weight: 600;
+            text-align: center;
+            border-radius: 12px;
+            margin-bottom: 12px;
+        }
+        .sync-status-bar {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            flex-wrap: wrap;
+            gap: 8px;
+            padding: 10px 14px;
+            margin: -4px -4px 12px -4px;
+            border-radius: 12px;
+            font-size: 13px;
+            font-weight: 600;
+            background: rgba(255, 255, 255, 0.06);
+            border: 1px solid rgba(255, 255, 255, 0.12);
+        }
+        .sync-status-bar .sync-left {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+        .sync-dot {
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+            flex-shrink: 0;
+        }
+        .sync-dot.online { background: #22c55e; box-shadow: 0 0 8px rgba(34, 197, 94, 0.6); }
+        .sync-dot.offline { background: #ef4444; box-shadow: 0 0 8px rgba(239, 68, 68, 0.5); }
+        .sync-queue-badge {
+            background: rgba(251, 191, 36, 0.2);
+            color: #fbbf24;
+            padding: 4px 10px;
+            border-radius: 999px;
+            font-size: 12px;
+            border: 1px solid rgba(251, 191, 36, 0.35);
+        }
+        .sync-queue-badge:empty { display: none; }
+        .chat-pulse-banner {
+            text-align: center;
+            padding: 10px 14px;
+            margin: -4px -4px 8px -4px;
+            border-radius: 12px;
+            font-size: 14px;
+            font-weight: 800;
+            letter-spacing: 0.04em;
+            color: #ecfdf5;
+            background: linear-gradient(135deg, rgba(22, 163, 74, 0.4) 0%, rgba(21, 128, 61, 0.55) 100%);
+            border: 1px solid rgba(74, 222, 128, 0.5);
+            animation: pulse 2s ease-in-out infinite;
+        }
+        @keyframes pulse {
+            0%, 100% {
+                opacity: 1;
+                box-shadow: 0 0 0 0 rgba(34, 197, 94, 0.55);
+            }
+            50% {
+                opacity: 0.88;
+                box-shadow: 0 0 22px 6px rgba(34, 197, 94, 0.4);
+            }
+        }
+        .error-overlay {
+            position: fixed;
+            inset: 0;
+            background: var(--uber-dark);
+            color: var(--uber-light);
+            display: none;
+            align-items: center;
+            justify-content: center;
+            text-align: center;
+            padding: 24px;
+            font-size: 16px;
+            z-index: 9998;
+        }
+        .error-overlay.visible { display: flex; flex-direction: column; gap: 16px; }
+        .gps-modal {
+            position: fixed; inset: 0; background: rgba(0,0,0,0.85);
+            display: none; align-items: center; justify-content: center;
+            z-index: 10001; padding: 20px;
+        }
+        .gps-modal.visible { display: flex; }
+        .gps-modal-box {
+            background: var(--uber-gray);
+            border-radius: 20px;
+            padding: 28px;
+            text-align: center;
+            max-width: 340px;
+            border: 1px solid rgba(255,255,255,0.15);
+        }
+        .gps-modal-box h3 { font-size: 18px; margin-bottom: 12px; color: var(--uber-warning); }
+        .gps-modal-box p { font-size: 15px; line-height: 1.5; margin-bottom: 20px; opacity: 0.9; }
+        .gps-modal-box .btn { padding: 14px 28px; border-radius: 12px; font-weight: 700; cursor: pointer; border: none; background: var(--uber-blue); color: white; }
+        .nav-top-bar {
+            position: fixed; top: 0; left: 0; right: 0; height: 70px;
+            background: #276EF1; color: white; z-index: 1001;
+            display: flex; align-items: center; padding: 0 20px; gap: 16px;
+            box-shadow: 0 2px 12px rgba(0,0,0,0.2);
+        }
+        .nav-turn-icon { font-size: 36px; line-height: 1; }
+        .nav-info { flex: 1; }
+        .nav-meters { font-size: 22px; font-weight: 700; }
+        .nav-street { font-size: 14px; opacity: 0.9; }
+        .nav-turn-icon svg { width: 40px; height: 40px; }
+        .btn-2d3d {
+            position: fixed; bottom: 200px; right: 16px; z-index: 999;
+            padding: 10px 14px; border-radius: 10px; border: none;
+            background: rgba(255,255,255,0.95); color: #333;
+            font-weight: 600; font-size: 13px; cursor: pointer;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.2);
+        }
+        #compassBtn {
+            position: fixed; bottom: 250px; right: 16px; z-index: 999;
+            width: 44px; height: 44px; border-radius: 50%;
+            background: white; border: none; cursor: pointer;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.2);
+            display: flex; align-items: center; justify-content: center;
+        }
+        #compassBtn svg { width: 24px; height: 24px; fill: #333; }
+        .btn-center-map { display: none; }
+        /* V16 Professional Navigator - demo UI */
+        #top-bar {
+            position: fixed; top: 0; left: 0; right: 0; z-index: 1001;
+            background: #276EF1; padding: 12px 16px 12px 12px;
+            display: flex; align-items: center; gap: 12px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.25); min-height: 62px;
+        }
+        #turn-icon { flex-shrink: 0; width: 40px; height: 40px; display: flex; align-items: center; justify-content: center; }
+        #turn-icon svg { width: 36px; height: 36px; fill: white; }
+        #top-dist { font-size: 26px; font-weight: 800; color: white; letter-spacing: -0.5px; min-width: 56px; }
+        #top-road { font-size: 16px; font-weight: 500; color: white; opacity: 0.95; flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+        #nav-bottom {
+            position: fixed; bottom: 0; left: 0; width: 100%; z-index: 1000; margin: 0;
+            padding: 12px 14px; padding-bottom: max(24px, env(safe-area-inset-bottom));
+            display: flex; align-items: center; justify-content: center;
+            background: rgba(0,0,0,0.85); backdrop-filter: blur(16px);
+            border-radius: 15px 15px 0 0; box-sizing: border-box;
+        }
+        #eta-box { background: white; border-radius: 8px; padding: 10px 20px; box-shadow: 0 2px 10px rgba(0,0,0,0.18); text-align: center; min-width: 100px; }
+        #eta-t { font-size: 18px; font-weight: 800; color: var(--uber-blue); }
+        #eta-d { font-size: 12px; color: #888; margin-top: 2px; }
+        .dm-wrap { position: relative; display: inline-block; width: 48px; height: 48px; }
+        .dm-ring { position: absolute; inset: -10px; border-radius: 50%; background: rgba(39,110,241,0.15); pointer-events: none; }
+        .dm-circle { width: 48px; height: 48px; border-radius: 50%; background: white; box-shadow: 0 3px 14px rgba(0,0,0,0.28); display: flex; align-items: center; justify-content: center; position: relative; }
+        .dm-arrow { width: 26px; height: 26px; fill: var(--uber-blue); }
+        .dest-wrap { width: 40px; height: 48px; position: relative; }
+        .dest-pin { width: 36px; height: 36px; background: var(--uber-danger); border-radius: 50% 50% 50% 0; transform: rotate(-45deg); border: 3px solid white; box-shadow: 0 4px 14px rgba(0,0,0,0.35); display: flex; align-items: center; justify-content: center; margin: 0 auto; }
+        .dest-pin span { transform: rotate(45deg); font-size: 9px; color: white; font-weight: 800; text-align: center; line-height: 1; }
+    </style>
+</head>
+<body>
+    <div class="gps-modal" id="gpsModal">
+        <div class="gps-modal-box">
+            <h3>📍 GPS ruxsat kerak</h3>
+            <p>GPS ruxsat berilmagan yoki aniqlanmadi. Iltimos telefon sozlamalarida Telegram uchun Location ruxsatini yoqing.</p>
+            <button class="btn" onclick="hideGpsModal()">Tushundim</button>
+        </div>
+    </div>
+    <div class="error-overlay" id="errorOverlay"></div>
+    <div class="loading-overlay" id="loading"><div class="load-text">Ma&#39;lumotlar yuklanmoqda...</div><div class="spinner"></div></div>
+    <div id="top-bar">
+        <div id="turn-icon"><svg id="turn-svg" viewBox="0 0 24 24"><path d="M4 12l1.41 1.41L11 7.83V20h2V7.83l5.58 5.59L20 12l-8-8-8 8z"/></svg></div>
+        <div id="top-dist">— m</div>
+        <div id="top-road">Mijozga yo&#39;l</div>
+    </div>
+    <div id="map-container"><div id="map-wrap"><div id="map"></div></div></div>
+    <button id="compassBtn" title="Shimol / Yo'nalish" style="display:none;"><svg viewBox="0 0 24 24"><path d="M12 2L4 20l8-4 8 4L12 2z"/></svg></button>
+    <div id="nav-bottom"><div id="eta-box"><div id="eta-t">--:--</div><div id="eta-d">—</div></div></div>
+    <div class="bottom-panel" id="arrivingPanel">
+        <div class="panel-handle"></div>
+        <div class="distance-info">
+            <div style="display:flex;align-items:center;justify-content:center;gap:24px;margin-bottom:16px;">
+                <div style="text-align:center;">
+                    <div class="distance-label">MASOFA</div>
+                    <div class="distance-value">
+                        <span id="distanceToClient">0.00</span>
+                        <span style="font-size:18px">km</span>
+                    </div>
+                </div>
+                <div style="width:1px;height:48px;background:rgba(255,255,255,0.15);"></div>
+                <div style="text-align:center;">
+                    <div class="distance-label">VAQT</div>
+                    <div class="distance-value" style="font-size:32px;">
+                        <span id="timeToClient">—</span>
+                        <span style="font-size:16px">min</span>
+                    </div>
+                </div>
+            </div>
+        </div>
+        <button class="action-btn btn-success" id="arrivedBtn" onclick="handleArrived()">
+            ✓ KELDIM — Mijozga xabar berish
+        </button>
+        <button class="action-btn btn-primary" id="startTripBtn" onclick="handleStartTrip()" style="display:none;">► SAFARNI BOSHLASH</button>
+    </div>
+    <div class="taximeter-screen" id="taximeterScreen">
+        <div class="chat-pulse-banner" id="chatPulseBanner">💬 CHAT: BOTDA</div>
+        <div class="sync-status-bar" id="syncStatusBar">
+            <div class="sync-left">
+                <span class="sync-dot" id="syncConnDot"></span>
+                <span id="syncConnText">—</span>
+            </div>
+            <span class="sync-queue-badge" id="syncQueueBadge"></span>
+        </div>
+        <div class="fare-display">
+            <div style="font-size: 14px; opacity: 0.7;">Joriy to&#39;lov</div>
+            <div class="fare-amount" id="currentFare">0</div>
+            <div style="font-weight: 600;">SO&#39;M</div>
+        </div>
+        <div class="stats-grid">
+            <div class="stat-card"><div>📏 Masofa</div><div class="stat-value"><span id="tripDistance">0.0</span> km</div></div>
+            <div class="stat-card"><div>⏱️ Vaqt</div><div class="stat-value" id="tripTime">00:00</div></div>
+        </div>
+        <button class="action-btn btn-warning" id="waitingBtn" onclick="toggleWaiting()">⏸ PAUZA / KUTISH</button>
+        <button class="action-btn btn-danger" id="finishBtn" onclick="handleFinish()">◼ SAFARNI YAKUNLASH</button>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/maplibre-gl@3.6.2/dist/maplibre-gl.js"></script>
+    <script src="https://unpkg.com/@turf/turf@6/turf.min.js?v=8.0.0"></script>
+    <script src="/static/main.js"></script>
+</body>
+</html>
