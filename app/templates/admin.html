@@ -73,14 +73,14 @@
 <div id="loginScreen" class="login-wrap">
     <div class="login-card">
         <h1>Admin Panel</h1>
-        <p style="color:#94a3b8;font-size:0.9rem;margin-bottom:20px">Telegram ID va .env dagi ADMIN_PASSWORD orqali kirish</p>
+        <p style="color:#94a3b8;font-size:0.9rem;margin-bottom:20px">Parol va admin token (.env: ADMIN_PASSWORD va ADMIN_LOGIN_TOKEN)</p>
         <div class="form-group">
-            <label>Telegram ID</label>
-            <input type="text" id="loginTelegramId" placeholder="123456789" autocomplete="username">
+            <label>Parol</label>
+            <input type="password" id="loginPassword" placeholder="ADMIN_PASSWORD" autocomplete="current-password">
         </div>
         <div class="form-group">
-            <label>Parol (ADMIN_PASSWORD)</label>
-            <input type="password" id="loginPassword" placeholder="Parol" autocomplete="current-password">
+            <label>Admin token (yashirin kalit)</label>
+            <input type="password" id="loginAdminToken" placeholder="ADMIN_LOGIN_TOKEN" autocomplete="off">
         </div>
         <div id="loginMsg" class="msg hidden"></div>
         <button onclick="doLogin()" style="width:100%;margin-top:8px">Kirish</button>
@@ -242,19 +242,26 @@ async function parseErrorResponse(r) {
 }
 
 async function doLogin() {
-    const val = document.getElementById('loginTelegramId').value.trim();
     const pass = document.getElementById('loginPassword').value;
-    if (!val || !pass) { showMsg('loginMsg', 'Telegram ID va parol kiriting', true); return; }
-    const tid = parseInt(val, 10);
-    if (isNaN(tid)) { showMsg('loginMsg', 'Telegram ID raqam bo\'lishi kerak', true); return; }
+    const admTok = document.getElementById('loginAdminToken').value;
+    if (!pass || !admTok) { showMsg('loginMsg', 'Parol va admin token kiriting', true); return; }
     try {
         const r = await fetch(API + '/login', {
             method: 'POST',
-            headers: headers(),
-            body: JSON.stringify({ telegram_id: tid, password: pass })
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ password: pass, admin_token: admTok })
         });
-        const j = await r.json();
-        if (!r.ok) { showMsg('loginMsg', j.detail || 'Xato', true); return; }
+        let j = {};
+        try { j = await r.json(); } catch (_) { j = {}; }
+        if (!r.ok) {
+            var msg = '';
+            if (j.detail) {
+                msg = Array.isArray(j.detail) ? j.detail.map(function (x) { return x.msg || x; }).join(', ') : String(j.detail);
+            }
+            showMsg('loginMsg', msg || (r.status === 429 ? 'Juda ko\'p urinish. 10 daqiqadan keyin qayta urinib ko\'ring.' : 'Kirish rad etildi'), true);
+            return;
+        }
+        if (!j.access_token) { showMsg('loginMsg', 'Javobda token yo\'q', true); return; }
         token = j.access_token;
         localStorage.setItem('admin_token', token);
         document.getElementById('loginScreen').classList.add('hidden');

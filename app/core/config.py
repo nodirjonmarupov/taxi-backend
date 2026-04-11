@@ -65,6 +65,16 @@ class Settings(BaseSettings):
             )
         return s
 
+    @field_validator("ADMIN_LOGIN_TOKEN")
+    @classmethod
+    def validate_admin_login_token(cls, v: str) -> str:
+        s = (v or "").strip()
+        if not s:
+            raise ValueError(
+                "ADMIN_LOGIN_TOKEN cannot be empty or whitespace-only; set it in .env"
+            )
+        return s
+
     @field_validator("ADMIN_IDS", mode="before")
     @classmethod
     def parse_admin_ids(cls, v):
@@ -81,6 +91,10 @@ class Settings(BaseSettings):
     ADMIN_PASSWORD: str = Field(
         ...,
         description="Admin panel login password; must be set in environment (non-empty).",
+    )
+    ADMIN_LOGIN_TOKEN: str = Field(
+        ...,
+        description="Second admin login secret (token); must be set in environment (non-empty).",
     )
 
     # Security

@@ -4,9 +4,10 @@ Faqat mavjud bo'lgan Order, User va Driver modellaridan foydalanadi.
 """
 import json
 import logging
+import secrets
 from typing import List, Optional
 from datetime import datetime
-from fastapi import APIRouter, Depends, HTTPException, status, Query
+from fastapi import APIRouter, Depends, HTTPException, status, Query, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func, cast, Date, text, or_
 from pydantic import BaseModel, Field
@@ -14,6 +15,13 @@ from pydantic import BaseModel, Field
 from app.core.database import get_db
 from app.core.config import settings as config
 from app.core.security import create_access_token
+from app.core.admin_login_rate_limit import (
+    clear_admin_login_failures,
+    client_ip_from_request,
+    is_admin_login_locked,
+    lockout_message,
+    record_admin_login_failure,
+)
 from app.api.deps import get_current_admin
 from app.crud.user import UserCRUD, DriverCRUD, RatingCRUD
 from app.crud.order_crud import OrderCRUD
@@ -136,9 +144,8 @@ async def complete_trip(
 
 # ==================== ADMIN ENDPOINTS ====================
 class AdminLoginRequest(BaseModel):
-    phone: Optional[str] = None
-    telegram_id: Optional[int] = None
-    password: str
+    password: str = Field(..., min_length=1)
+    admin_token: str = Field(..., min_length=1, description="ADMIN_LOGIN_TOKEN (second secret)")
 
 
 class AdminLoginResponse(BaseModel):
@@ -147,21 +154,44 @@ class AdminLoginResponse(BaseModel):
 
 
 @admin_router.post("/login", response_model=AdminLoginResponse)
-async def admin_login(body: AdminLoginRequest, db: AsyncSession = Depends(get_db)):
-    """Admin login: phone yoki telegram_id + parol. User is_admin=True va is_active=True bo'lishi kerak."""
-    if body.password != config.ADMIN_PASSWORD:
+async def admin_login(
+    request: Request,
+    body: AdminLoginRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    """Admin login: ADMIN_PASSWORD + ADMIN_LOGIN_TOKEN (no Telegram ID). Rate-limited per client IP."""
+    ip = client_ip_from_request(request)
+    if is_admin_login_locked(ip):
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail=lockout_message(),
+        )
+    pw_ok = secrets.compare_digest(
+        body.password.encode("utf-8"),
+        config.ADMIN_PASSWORD.encode("utf-8"),
+    )
+    tok_ok = secrets.compare_digest(
+        body.admin_token.encode("utf-8"),
+        config.ADMIN_LOGIN_TOKEN.encode("utf-8"),
+    )
+    if not (pw_ok and tok_ok):
+        record_admin_login_failure(ip)
         raise HTTPException(status_code=401, detail="Invalid credentials")
-    user = None
-    if body.phone:
-        user = await UserCRUD.get_by_phone(db, body.phone)
-    elif body.telegram_id is not None:
-        user = await UserCRUD.get_by_telegram_id(db, body.telegram_id)
+    clear_admin_login_failures(ip)
+
+    result = await db.execute(
+        select(User).where(User.is_admin == True).order_by(User.id.asc()).limit(1)
+    )
+    user = result.scalar_one_or_none()
     if not user:
-        raise HTTPException(status_code=401, detail="Invalid credentials")
-    if not getattr(user, "is_admin", False):
-        raise HTTPException(status_code=403, detail="Admin access required")
+        raise HTTPException(
+            status_code=503,
+            detail="No admin user in database. Set is_admin=true for at least one user.",
+        )
     if not getattr(user, "is_active", True):
         raise HTTPException(status_code=403, detail="User is inactive")
+    if getattr(user, "is_blocked", False):
+        raise HTTPException(status_code=403, detail="User is blocked")
     token = create_access_token(data={"sub": str(user.id)})
     return AdminLoginResponse(access_token=token)
 
