@@ -5,12 +5,12 @@ Faqat mavjud bo'lgan Order, User va Driver modellaridan foydalanadi.
 import json
 import logging
 import secrets
-from typing import List, Optional
+from typing import List, Optional, Union
 from datetime import datetime
 from fastapi import APIRouter, Depends, HTTPException, status, Query, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func, cast, Date, text, or_
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from app.core.database import get_db
 from app.core.config import settings as config
@@ -144,8 +144,31 @@ async def complete_trip(
 
 # ==================== ADMIN ENDPOINTS ====================
 class AdminLoginRequest(BaseModel):
+    telegram_id: Optional[Union[int, str]] = None
     password: str = Field(..., min_length=1)
-    admin_token: str = Field(..., min_length=1, description="ADMIN_LOGIN_TOKEN (second secret)")
+    admin_token: Optional[str] = Field(
+        default=None,
+        description="ADMIN_LOGIN_TOKEN (second secret); omit to use password-only login",
+    )
+
+    @field_validator("telegram_id", mode="before")
+    @classmethod
+    def normalize_telegram_id(cls, v):
+        if v is None:
+            return None
+        if isinstance(v, bool):
+            raise ValueError("telegram_id must be int or str, not bool")
+        if isinstance(v, int):
+            return v
+        if isinstance(v, str):
+            s = v.strip()
+            if not s:
+                return None
+            try:
+                return int(s)
+            except ValueError:
+                raise ValueError("telegram_id must be a valid integer")
+        raise ValueError("telegram_id must be int or str")
 
 
 class AdminLoginResponse(BaseModel):
@@ -159,7 +182,7 @@ async def admin_login(
     body: AdminLoginRequest,
     db: AsyncSession = Depends(get_db),
 ):
-    """Admin login: ADMIN_PASSWORD + ADMIN_LOGIN_TOKEN (no Telegram ID). Rate-limited per client IP."""
+    """Admin login: ADMIN_PASSWORD; optional ADMIN_LOGIN_TOKEN. Rate-limited per client IP."""
     ip = client_ip_from_request(request)
     if is_admin_login_locked(ip):
         raise HTTPException(
@@ -170,10 +193,14 @@ async def admin_login(
         body.password.encode("utf-8"),
         config.ADMIN_PASSWORD.encode("utf-8"),
     )
-    tok_ok = secrets.compare_digest(
-        body.admin_token.encode("utf-8"),
-        config.ADMIN_LOGIN_TOKEN.encode("utf-8"),
-    )
+    raw_tok = body.admin_token
+    if raw_tok is None or (isinstance(raw_tok, str) and not raw_tok.strip()):
+        tok_ok = True
+    else:
+        tok_ok = secrets.compare_digest(
+            raw_tok.strip().encode("utf-8"),
+            config.ADMIN_LOGIN_TOKEN.encode("utf-8"),
+        )
     if not (pw_ok and tok_ok):
         record_admin_login_failure(ip)
         raise HTTPException(status_code=401, detail="Invalid credentials")
