@@ -6,9 +6,9 @@ from typing import Optional, List
 from pydantic_settings import BaseSettings
 from pydantic import Field, field_validator
 
-_DEFAULT_SECRET_PLACEHOLDER = "change-this-secret-key-in-production"
+_DEFAULT_SECRET_KEY = "dev_secret_key_987654321"
 _DEFAULT_ADMIN_PASSWORD = "changeme"
-_DEFAULT_ADMIN_LOGIN_TOKEN = "default_admin_token_123"
+_DEFAULT_ADMIN_LOGIN_TOKEN = "default_token_123"
 
 
 class Settings(BaseSettings):
@@ -48,7 +48,7 @@ class Settings(BaseSettings):
     def validate_secret_key(cls, v: str) -> str:
         s = (v or "").strip()
         if not s:
-            return _DEFAULT_SECRET_PLACEHOLDER
+            return _DEFAULT_SECRET_KEY
         return s
 
     @field_validator("ADMIN_PASSWORD")
@@ -91,7 +91,7 @@ class Settings(BaseSettings):
 
     # Security
     SECRET_KEY: str = Field(
-        default=_DEFAULT_SECRET_PLACEHOLDER,
+        default=_DEFAULT_SECRET_KEY,
         description="JWT signing key; must be a strong secret, not the placeholder value.",
     )
     ALGORITHM: str = "HS256"
