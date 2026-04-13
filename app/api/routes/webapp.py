@@ -313,13 +313,15 @@ async def update_order_status(
                         int(s_cfg.price_per_min_waiting),
                     )
                 computed = compute_fare(tariff, d_km, w_sec)
-                resolved_final = float(computed)
+                cp = parse_client_final_price(final_price)
+
+                if cp is not None:
+                    verify_final_price(cp, computed)
+                    resolved_final = cp
+                else:
+                    resolved_final = float(computed)
                 sanitized_dist = d_km
                 tariff_snapshot_for_db = tariff
-                if final_price is not None:
-                    cp = parse_client_final_price(final_price)
-                    if cp is not None:
-                        verify_final_price(cp, computed)
             else:
                 if distance_km is not None:
                     d_src = distance_km
@@ -335,7 +337,13 @@ async def update_order_status(
                         int(s_cfg.price_per_min_waiting),
                     )
                 computed = compute_fare(tariff, d_km, 0.0)
-                resolved_final = float(computed)
+                cp = parse_client_final_price(final_price)
+
+                if cp is not None:
+                    verify_final_price(cp, computed)
+                    resolved_final = cp
+                else:
+                    resolved_final = float(computed)
                 sanitized_dist = d_km
                 tariff_snapshot_for_db = tariff
                 logger.warning(
@@ -343,10 +351,6 @@ async def update_order_status(
                     "surge=1.0 fallback + DB masofa (kutish 0) "
                     f"(order_id={order_id})"
                 )
-                if final_price is not None:
-                    cp = parse_client_final_price(final_price)
-                    if cp is not None:
-                        verify_final_price(cp, computed)
 
         updated_order = await OrderCRUD.update_status(
             db,
