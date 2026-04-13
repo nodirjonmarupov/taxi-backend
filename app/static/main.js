@@ -41,6 +41,7 @@ let _lastPredSnapUpdate = 0; // throttle Turf prediction snap (~10 FPS)
 let _lastTurnI = null;       // DOM cache: suppress updateNavUI when nothing changed
 let _lastDist = null;
 let _lastArrowDeg = null;
+let _displayArrowBrg = null;
 let _lastStableLat = null;
 let _lastStableLng = null;
 let _pendingGps = null;    // queued GPS update received before _driverRouteLine was ready
@@ -498,7 +499,13 @@ function renderLoop() {
         var _headDecay = Math.exp(-dt / _tauHead);
         var _hdShortcut = ((brg - displayHeading + 540) % 360) - 180;
         displayHeading = (displayHeading + _hdShortcut * (1 - _headDecay) + 360) % 360;
-        var _arrowDeg = (displayHeading - displayBearing + 720) % 360;
+        // _displayArrowBrg: displayBearing ni strelka uchun alohida smooth kuzatadi.
+        // tau=0.06s — displayBearing (tau ~0.15-0.80s) dan tezroq,
+        // shuning uchun kamera aylanayotganda strelka unga yopishib qoladi.
+        if (_displayArrowBrg === null) _displayArrowBrg = displayBearing;
+        var _arrowBrgShortcut = ((displayBearing - _displayArrowBrg + 540) % 360) - 180;
+        _displayArrowBrg = (_displayArrowBrg + _arrowBrgShortcut * (1 - Math.exp(-dt / 0.06)) + 360) % 360;
+        var _arrowDeg = (displayHeading - _displayArrowBrg + 720) % 360;
         if (_lastArrowDeg === null || Math.abs((_arrowDeg - _lastArrowDeg + 540) % 360 - 180) > 0.3) {
             if (arrowEl) arrowEl.style.transform = 'rotate(' + _arrowDeg + 'deg)';
             _lastArrowDeg = _arrowDeg;
