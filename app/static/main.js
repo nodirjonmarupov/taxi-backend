@@ -40,6 +40,8 @@ let _lastSnapUpdate = 0;     // throttle Turf nav snap (~10 FPS adaptive)
 let _lastPredSnapUpdate = 0; // throttle Turf prediction snap (~10 FPS)
 let _lastTurnI = null;       // DOM cache: suppress updateNavUI when nothing changed
 let _lastDist = null;
+let _lastStableLat = null;
+let _lastStableLng = null;
 let _pendingGps = null;    // queued GPS update received before _driverRouteLine was ready
 let _firstSnapDone = false; // true after the first successful Turf snap; guards dead zone
 let _snapRouteLine = null;  // trimmed forward-only snap line; rebuilt after each snap
@@ -439,6 +441,27 @@ function renderLoop() {
             }
             _lastPredSnapUpdate = _nowMs;
         }
+
+        if (_predLat !== null && _predLng !== null) {
+            if (_lastStableLat === null || _lastStableLng === null) {
+                _lastStableLat = _predLat;
+                _lastStableLng = _predLng;
+            } else {
+                var _stableMoveDist = haversineM(_predLat, _predLng, _lastStableLat, _lastStableLng);
+                var _stableThresh = spd < 5 ? 3 : 1;
+
+                if (spd < 2 && _stableMoveDist < _stableThresh) {
+                    // Only freeze if movement is REALLY tiny
+                    if (_stableMoveDist < 5) {
+                        _predLat = _lastStableLat;
+                        _predLng = _lastStableLng;
+                    }
+                } else {
+                    _lastStableLat = _predLat;
+                    _lastStableLng = _predLng;
+                }
+            }
+        }
         // updatePosition ?????????????????????????????????????????????????????????
         // ?_pos = 0.50s when parked: heavily damps GPS noise, prevents jitter.
         // ?_pos = 0.12s when moving: fast settling (~360ms), GPS jumps absorbed.
@@ -486,8 +509,18 @@ function renderLoop() {
                     try {
                         var _navSnap = turf.nearestPointOnLine(_driverRouteLine, turf.point([dLng, dLat]));
                         if (_navSnap && _navSnap.properties && _navSnap.properties.index != null) {
-                            _routeAnchorIdx = Math.min(_navSnap.properties.index,
-                                _driverRouteCoords.length > 1 ? _driverRouteCoords.length - 2 : 0);
+                            var _maxIdx = _driverRouteCoords.length > 1 ? _driverRouteCoords.length - 2 : 0;
+                            var _newIdx = Math.min(_navSnap.properties.index, _maxIdx);
+                            if (typeof _routeAnchorIdx === 'number' && !isNaN(_routeAnchorIdx) && _newIdx < _routeAnchorIdx) {
+                                var diff = _routeAnchorIdx - _newIdx;
+
+                                // Allow real backward jump if it's large (actual turn)
+                                if (diff < 3) {
+                                    _newIdx = _routeAnchorIdx;
+                                }
+                            }
+
+                            _routeAnchorIdx = _newIdx;
                         }
                     } catch (_) {}
                 }
@@ -1134,8 +1167,18 @@ function updateDriverMarker(lat, lng, heading) {
                     // The old vertex-search loop found the nearest START node which is wrong
                     // when the projection point is near a segment's end (off-by-one ??wrong DR).
                     if (_snapRes.properties && _snapRes.properties.index != null) {
-                        _routeAnchorIdx = Math.min(_snapRes.properties.index,
-                            _driverRouteCoords.length > 1 ? _driverRouteCoords.length - 2 : 0);
+                        var _maxIdx = _driverRouteCoords.length > 1 ? _driverRouteCoords.length - 2 : 0;
+                        var _newIdx = Math.min(_snapRes.properties.index, _maxIdx);
+                        if (typeof _routeAnchorIdx === 'number' && !isNaN(_routeAnchorIdx) && _newIdx < _routeAnchorIdx) {
+                            var diff = _routeAnchorIdx - _newIdx;
+
+                            // Allow real backward jump if it's large (actual turn)
+                            if (diff < 3) {
+                                _newIdx = _routeAnchorIdx;
+                            }
+                        }
+
+                        _routeAnchorIdx = _newIdx;
                         // Rebuild trimmed snap line: snapped point + all vertices ahead.
                         // Starting from the exact snapped coordinate (not segment start vertex)
                         // ensures the next snap cannot project backward even by one segment.
