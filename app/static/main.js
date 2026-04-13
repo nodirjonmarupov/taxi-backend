@@ -40,6 +40,7 @@ let _lastSnapUpdate = 0;     // throttle Turf nav snap (~10 FPS adaptive)
 let _lastPredSnapUpdate = 0; // throttle Turf prediction snap (~10 FPS)
 let _lastTurnI = null;       // DOM cache: suppress updateNavUI when nothing changed
 let _lastDist = null;
+let _lastArrowDeg = null;
 let _lastStableLat = null;
 let _lastStableLng = null;
 let _pendingGps = null;    // queued GPS update received before _driverRouteLine was ready
@@ -492,11 +493,16 @@ function renderLoop() {
         var _brgShortcut = ((targetBearing - displayBearing + 540) % 360) - 180;
         displayBearing = (displayBearing + _brgShortcut * (1 - _brgDecay) + 360) % 360;
 
-        // Arrow heading: ? = 0.08s ??leads the camera turn so arrow "points ahead".
-        var _headDecay = Math.exp(-dt / 0.08);
+        // Arrow heading: adaptive tau to reduce low-speed jitter.
+        var _tauHead = spd < 5 ? 0.25 : spd < 20 ? 0.15 : 0.10;
+        var _headDecay = Math.exp(-dt / _tauHead);
         var _hdShortcut = ((brg - displayHeading + 540) % 360) - 180;
         displayHeading = (displayHeading + _hdShortcut * (1 - _headDecay) + 360) % 360;
-        if (arrowEl) arrowEl.style.transform = 'rotate(' + ((displayHeading - displayBearing + 720) % 360) + 'deg)';
+        var _arrowDeg = (displayHeading - displayBearing + 720) % 360;
+        if (_lastArrowDeg === null || Math.abs((_arrowDeg - _lastArrowDeg + 540) % 360 - 180) > 0.3) {
+            if (arrowEl) arrowEl.style.transform = 'rotate(' + _arrowDeg + 'deg)';
+            _lastArrowDeg = _arrowDeg;
+        }
 
         if (driverMarker && dLat !== null && dLng !== null) {
             driverMarker.setLngLat([dLng, dLat]);
