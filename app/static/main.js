@@ -198,7 +198,7 @@ const ROUTE_SNAP_MAX_M = 20;
 const RAW_GPS_MIN_MOVE_M = 5;
 const RAW_GPS_REF_FREEZE_MAX_KMH = 6;
 const RAW_GPS_HOLD_MAX_KMH = 12;
-const HEADING_BUFFER_MAX = 5;
+const HEADING_BUFFER_MAX = 8;
 const HEADING_BUFFER_RESET_DEG = 30;
 const PREDICT_AHEAD_MIN_S = 0.3;
 const PREDICT_AHEAD_MAX_S = 0.5;
@@ -1281,7 +1281,7 @@ function updateDriverMarker(lat, lng, heading) {
             var _blendDiff = ((_coordBrg - _tangBrg + 540) % 360) - 180;
             var _blended  = (_tangBrg + _blendDiff * _coordW + 360) % 360;
             var _delta = Math.abs(((_blended - brg + 540) % 360) - 180);
-            if (_delta >= 1) brg = _blended;
+            if (_delta >= 2) brg = _blended;
         }
         if (!driverMarker) {
             var _tangentInit = (typeof turf !== 'undefined' && _driverRouteLine)
@@ -1306,7 +1306,7 @@ function updateDriverMarker(lat, lng, heading) {
             var _brgPreBuf = brg;
             var _prevBufMean = headingBuffer.length ? circularMeanHeadings(headingBuffer) : _brgPreBuf;
             var _bufTurnDiff = Math.abs(((_brgPreBuf - _prevBufMean + 540) % 360) - 180);
-            if (_bufTurnDiff > HEADING_BUFFER_RESET_DEG && speedKmh > 3) headingBuffer = [];
+            if (_bufTurnDiff > HEADING_BUFFER_RESET_DEG && speedKmh > 8) headingBuffer = [];
             headingBuffer.push(_brgPreBuf);
             if (headingBuffer.length > HEADING_BUFFER_MAX) headingBuffer.shift();
             brg = circularMeanHeadings(headingBuffer);
