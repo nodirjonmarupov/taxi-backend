@@ -12,16 +12,15 @@ let TARIFF = { startPrice: 5000, pricePerKm: 2500, pricePerMinWaiting: 500, minD
 let ORDER_DATA = null;
 const tg = (window.Telegram && window.Telegram.WebApp) ? window.Telegram.WebApp : { expand: function(){}, ready: function(){} };
 
-let map, tileLayer, driverMarker, clientMarker, destMarker, routeControl, routeControlAB;
+let map, driverMarker, clientMarker, destMarker;
 let routeRoadDistanceKm = null;
-let routeInstructions = [], routeCoordinates = [], routePolyline = null, routeDecorator = null;
+let routeInstructions = [], routeCoordinates = [];
 // Turf route line feature (haydovchi uchun snapping va progressive trim)
 let _driverRouteLine = null;       // turf.lineString ??[lon,lat] koordinatlarda
 let _driverRouteCoords = [];       // [[lon,lat], ...] ??OSRM raw coords (GeoJSON tartib)
-let map2dMode = true;
 let arrowEl = null;
 let tLat = null, tLng = null, dLat = null, dLng = null, brg = 0, spd = 0;
-let pLat = null, pLng = null, locked = true, lastCam = 0;
+let pLat = null, pLng = null, locked = true;
 let simIdx = 0, simOn = false, simTmr = null, turnI = 0, distKm = 1;
 let displayBearing = 0, targetBearing = 0;
 let displayHeading = 0;
@@ -31,7 +30,6 @@ let _velLat = 0, _velLng = 0;
 let _smoothVelLat = 0, _smoothVelLng = 0;
 let _gpsAnchorLat = null, _gpsAnchorLng = null, _gpsAnchorMs = 0;
 let _predLat = null, _predLng = null;
-let _camLat = null, _camLng = null;
 let _routeAnchorIdx = 0;
 let _currentInstructionIndex = 0; // next maneuver in routeInstructions; only advances forward
 let _stableZoom = null; // EMA-smoothed zoom; prevents per-frame flicker at speed boundaries
@@ -208,10 +206,8 @@ let gpsErrorShown = false;
 let navAutoMode = true;
 let returnToNavTimer = null;
 let _navProgrammatic = false;
-let _bearingAnimId = null;
 let lastPositionTime = null;
 let lastGpsSpeedKmh = null;
-let _markerAnimId = null;
 const CAMERA_OFFSET_M = 150;
 
 function haversineM(lat1, lon1, lat2, lon2) {
@@ -224,11 +220,6 @@ function haversineM(lat1, lon1, lat2, lon2) {
     return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
 }
 
-function lerp(a, b, t) { return a + (b - a) * t; }
-function lerpAngle(a, b, t) {
-    var diff = ((b - a + 540) % 360) - 180;
-    return (a + diff * t + 360) % 360;
-}
 function circularMeanHeadings(arr) {
     if (!arr || arr.length === 0) return 0;
     var sinSum = 0, cosSum = 0;
@@ -240,7 +231,6 @@ function circularMeanHeadings(arr) {
     return smooth < 0 ? smooth + 360 : smooth;
 }
 function speedToZoom(s) { return s > 70 ? 15 : s > 40 ? 15.5 : s > 20 ? 16.5 : 17.5; }
-function getZoomBySpeed(speedKmh) { return speedToZoom(speedKmh); }
 // Marshrutning snapped nuqtasidagi yo'nalishini hisoblaydi (GPS heading yo'q yoki ishonchsiz bo'lganda)
 function getRouteTangentBearing(snappedLon, snappedLat) {
     if (!_driverRouteLine || !_driverRouteCoords || _driverRouteCoords.length < 2) return null;
@@ -342,22 +332,6 @@ function addDriverMarker(lat, lon) {
         rotationAlignment: 'viewport', // viewport: MapLibre elementga o'z rotation qo'shmaydi ??CSS bilan to'liq nazorat
         pitchAlignment: 'viewport'
     }).setLngLat([lon, lat]).addTo(map);
-}
-function followCam() {
-    if (!locked || !map || dLat == null || dLng == null) return;
-    var zoom = speedToZoom(spd);
-    var pitch = 60;
-    var mpp = 156543 * Math.cos(dLat * Math.PI / 180) / Math.pow(2, zoom);
-    var fwd = window.innerHeight * 0.15 * mpp / Math.cos(pitch * Math.PI / 180);
-    var cc = getOffsetCenter(dLat, dLng, displayBearing, fwd);
-    map.easeTo({
-        center: [cc[1], cc[0]],
-        bearing: displayBearing,
-        pitch: pitch,
-        zoom: zoom,
-        duration: 500,
-        easing: function(x) { return x < 0.5 ? 2*x*x : 1 - Math.pow(-2*x+2,2)/2; }
-    });
 }
 function recenter() {
     locked = true;
