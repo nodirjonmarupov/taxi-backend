@@ -26,6 +26,7 @@ let displayBearing = 0, targetBearing = 0;
 let displayHeading = 0;
 let _camBlockUntil = 0;
 let _lastCamLat = null, _lastCamLng = null, _lastCamBrg = 0, _lastCamZoom = 0;
+let _lastCamUpdate = 0;
 let _velLat = 0, _velLng = 0;
 let _smoothVelLat = 0, _smoothVelLng = 0;
 let _gpsAnchorLat = null, _gpsAnchorLng = null, _gpsAnchorMs = 0;
@@ -46,6 +47,8 @@ let _pendingGps = null;    // queued GPS update received before _driverRouteLine
 let _firstSnapDone = false; // true after the first successful Turf snap; guards dead zone
 let _snapRouteLine = null;  // trimmed forward-only snap line; rebuilt after each snap
 let _lastRerouteMs = 0;    // timestamp of last reroute request (5 s cooldown)
+let _lastProgressLat = null;
+let _lastProgressLng = null;
 let northUpMode = false;
 let isManualMode = false, gestureStartAngle = null, gestureStartBearing = 0, manualBearing = 0, manualModeTimer = null, useManualBearing = false;
 let renderLoopRunning = false;
@@ -419,19 +422,15 @@ function renderLoop() {
         }
 
         if (_predLat !== null && _predLng !== null) {
-            if (_lastStableLat === null || _lastStableLng === null) {
+            if (_lastStableLat === null) {
                 _lastStableLat = _predLat;
                 _lastStableLng = _predLng;
             } else {
-                var _stableMoveDist = haversineM(_predLat, _predLng, _lastStableLat, _lastStableLng);
-                var _stableThresh = spd < 5 ? 3 : 1;
+                var dist = haversineM(_predLat, _predLng, _lastStableLat, _lastStableLng);
 
-                if (spd < 2 && _stableMoveDist < _stableThresh) {
-                    // Only freeze if movement is REALLY tiny
-                    if (_stableMoveDist < 5) {
-                        _predLat = _lastStableLat;
-                        _predLng = _lastStableLng;
-                    }
+                if (spd < 2 && dist < 4) {
+                    _predLat = _lastStableLat;
+                    _predLng = _lastStableLng;
                 } else {
                     _lastStableLat = _predLat;
                     _lastStableLng = _predLng;
@@ -468,6 +467,31 @@ function renderLoop() {
         var _brgShortcut = ((targetBearing - displayBearing + 540) % 360) - 180;
         displayBearing = (displayBearing + _brgShortcut * (1 - _brgDecay) + 360) % 360;
 
+        // SINGLE SOURCE BEARING (route-based)
+        if (typeof turf !== 'undefined' &&
+            _driverRouteCoords &&
+            _driverRouteCoords.length > 1 &&
+            typeof _routeAnchorIdx === 'number' &&
+            !isNaN(_routeAnchorIdx)) {
+
+            var _i = Math.max(0, Math.min(_routeAnchorIdx, _driverRouteCoords.length - 2));
+            var _curr = _driverRouteCoords[_i];
+            var _next = _driverRouteCoords[_i + 1];
+
+            if (_curr && _next) {
+                var _routeBrg = turf.bearing(turf.point(_curr), turf.point(_next));
+                _routeBrg = (_routeBrg + 360) % 360;
+
+                // optional GPS assist at high speed
+                if (lastHeading != null && spd > 15) {
+                    var _diff = Math.abs(((_routeBrg - lastHeading + 540) % 360) - 180);
+                    if (_diff < 20) _routeBrg = lastHeading;
+                }
+
+                brg = _routeBrg;
+            }
+        }
+
         // Arrow heading: adaptive tau to reduce low-speed jitter.
         var _tauHead = spd < 5 ? 0.25 : spd < 20 ? 0.15 : 0.10;
         var _headDecay = Math.exp(-dt / _tauHead);
@@ -480,7 +504,7 @@ function renderLoop() {
         var _arrowBrgShortcut = ((displayBearing - _displayArrowBrg + 540) % 360) - 180;
         _displayArrowBrg = (_displayArrowBrg + _arrowBrgShortcut * (1 - Math.exp(-dt / 0.06)) + 360) % 360;
         var _arrowDeg = (displayHeading - _displayArrowBrg + 720) % 360;
-        if (_lastArrowDeg === null || Math.abs((_arrowDeg - _lastArrowDeg + 540) % 360 - 180) > 0.3) {
+        if (_lastArrowDeg === null || Math.abs((_arrowDeg - _lastArrowDeg + 540) % 360 - 180) > 2) {
             if (arrowEl) arrowEl.style.transform = 'rotate(' + _arrowDeg + 'deg)';
             _lastArrowDeg = _arrowDeg;
         }
@@ -502,7 +526,7 @@ function renderLoop() {
                                 var diff = _routeAnchorIdx - _newIdx;
 
                                 // Allow real backward jump if it's large (actual turn)
-                                if (diff < 3) {
+                                if (diff < 2) {
                                     _newIdx = _routeAnchorIdx;
                                 }
                             }
@@ -542,12 +566,20 @@ function renderLoop() {
                 ? haversineM(dLat, dLng, _lastCamLat, _lastCamLng) : 999;
             var _moved = _moveDist > 1;
             var _zoomDelta = Math.abs(_zoom - _lastCamZoom);
-            if (_moved || _brgDelta > 2 || _zoomDelta > 0.1) {
-                map.jumpTo({ center: [dLng, dLat], bearing: displayBearing, pitch: 60, zoom: _zoom });
+            if ((_nowMs - _lastCamUpdate > 100) &&
+                (_moved || _brgDelta > 2 || _zoomDelta > 0.1)) {
+                map.easeTo({
+                    center: [dLng, dLat],
+                    bearing: displayBearing,
+                    pitch: 60,
+                    zoom: _zoom,
+                    duration: 80,
+                    easing: function(t){ return t * (2 - t); }
+                });
+
                 _lastCamLat = dLat;
                 _lastCamLng = dLng;
-                _lastCamBrg = displayBearing;
-                _lastCamZoom = _zoom;
+                _lastCamUpdate = _nowMs;
             }
         }
 
@@ -1160,7 +1192,7 @@ function updateDriverMarker(lat, lng, heading) {
                             var diff = _routeAnchorIdx - _newIdx;
 
                             // Allow real backward jump if it's large (actual turn)
-                            if (diff < 3) {
+                            if (diff < 2) {
                                 _newIdx = _routeAnchorIdx;
                             }
                         }
@@ -1250,6 +1282,7 @@ function updateDriverMarker(lat, lng, heading) {
         // _distW:  0 at ?? m moved ??1 at ??0 m moved.
         // _coordW = _speedW 횞 _distW: BOTH conditions must be met for coordinate bearing.
         // Below 3 km/h the block is skipped entirely ??bearing is frozen.
+        // updateDriverMarker must NOT modify brg (single source in renderLoop)
         if (_prevSnappedLat != null && _prevSnappedLng != null && speedKmh >= 3) {
             var _moveDist = haversineM(sl, sa, _prevSnappedLat, _prevSnappedLng);
             var _tangentBrg = (typeof turf !== 'undefined' && _driverRouteLine)
@@ -1262,7 +1295,7 @@ function updateDriverMarker(lat, lng, heading) {
             var _blendDiff = ((_coordBrg - _tangBrg + 540) % 360) - 180;
             var _blended  = (_tangBrg + _blendDiff * _coordW + 360) % 360;
             var _delta = Math.abs(((_blended - brg + 540) % 360) - 180);
-            if (_delta >= 2) brg = _blended;
+            // brg is owned by renderLoop (route-based single source)
         }
         if (!driverMarker) {
             var _tangentInit = (typeof turf !== 'undefined' && _driverRouteLine)
@@ -1270,7 +1303,6 @@ function updateDriverMarker(lat, lng, heading) {
             var _initBrg = _tangentInit !== null ? _tangentInit
                 : ((_prevSnappedLat != null && _prevSnappedLng != null)
                     ? calcBearing(_prevSnappedLat, _prevSnappedLng, sl, sa) : brg);
-            brg = _initBrg;
             headingBuffer = [brg];
             displayHeading = _initBrg;
             displayBearing = _initBrg;
@@ -1287,10 +1319,10 @@ function updateDriverMarker(lat, lng, heading) {
             var _brgPreBuf = brg;
             var _prevBufMean = headingBuffer.length ? circularMeanHeadings(headingBuffer) : _brgPreBuf;
             var _bufTurnDiff = Math.abs(((_brgPreBuf - _prevBufMean + 540) % 360) - 180);
-            if (_bufTurnDiff > HEADING_BUFFER_RESET_DEG && speedKmh > 8) headingBuffer = [];
-            headingBuffer.push(_brgPreBuf);
-            if (headingBuffer.length > HEADING_BUFFER_MAX) headingBuffer.shift();
-            brg = circularMeanHeadings(headingBuffer);
+                if (_bufTurnDiff > HEADING_BUFFER_RESET_DEG && speedKmh > 8) headingBuffer = [];
+                headingBuffer.push(_brgPreBuf);
+                if (headingBuffer.length > HEADING_BUFFER_MAX) headingBuffer.shift();
+                // brg is owned by renderLoop (route-based single source)
         }
         if (!routeCoordinates.length) {
             if (ORDER_DATA.pickup_latitude != null && ORDER_DATA.pickup_longitude != null) {
@@ -1539,6 +1571,12 @@ function drawRoute(from, to) {
 function updateProgressiveRoute(driverLon, driverLat) {
     if (typeof turf === 'undefined') return;
     if (!_driverRouteLine || !_driverRouteCoords || _driverRouteCoords.length < 2) return;
+    if (_lastProgressLat !== null) {
+        var _progMoveDist = haversineM(driverLat, driverLon, _lastProgressLat, _lastProgressLng);
+        if (_progMoveDist < 10) return;
+    }
+    _lastProgressLat = driverLat;
+    _lastProgressLng = driverLon;
     try {
         var drvPt = turf.point([driverLon, driverLat]);
         var snapped = turf.nearestPointOnLine(_driverRouteLine, drvPt, { units: 'kilometers' });
