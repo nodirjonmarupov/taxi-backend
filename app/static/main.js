@@ -930,7 +930,9 @@ async function init() {
             const data = await res.json();
             if (data && data.active) {
                 tripData.distance = data.distance_km || 0;
-                tripData.waitingTime = data.waiting_seconds || 0;
+                if (!tripData.isWaiting) {
+                    tripData.waitingTime = data.waiting_seconds || 0;
+                }
                 tripData.isWaiting = !!data.is_waiting;
                 tripData.surge = data.surge_multiplier != null && data.surge_multiplier !== undefined ? Number(data.surge_multiplier) : (tripData.surge || 1);
                 if (data.estimated_fare != null) tripData.serverFare = data.estimated_fare;
@@ -2084,7 +2086,9 @@ async function handleStartTrip() {
                 var _tmData = await _tmRes.json();
                 if (_tmData && _tmData.active) {
                     if (_tmData.distance_km != null) tripData.distance = _tmData.distance_km;
-                    if (_tmData.waiting_seconds != null) tripData.waitingTime = _tmData.waiting_seconds;
+                    if (!tripData.isWaiting) {
+                        if (_tmData.waiting_seconds != null) tripData.waitingTime = _tmData.waiting_seconds;
+                    }
                     tripData.isWaiting = !!_tmData.is_waiting;
                     tripData.surge = _tmData.surge_multiplier != null && _tmData.surge_multiplier !== undefined
                         ? Number(_tmData.surge_multiplier)
@@ -2105,6 +2109,21 @@ function toggleWaiting() {
         ? '▶ DAVOM ETISH'
         : '⏸ PAUZA / KUTISH';
     btn.className = tripData.isWaiting ? 'action-btn btn-success' : 'action-btn btn-warning';
+    var oid = (ORDER_DATA && ORDER_DATA.id != null) ? ORDER_DATA.id : ORDER_ID_CURRENT;
+    if (oid && WEBAPP_TOKEN) {
+        if (tripData.isWaiting) {
+            fetch(API_BASE_URL + '/api/webapp/order/' + oid + '/trip/pause?v=' + Date.now(), {
+                method: 'POST',
+                headers: webappHeaders()
+            }).catch(function() {});
+        } else {
+            fetch(API_BASE_URL + '/api/webapp/order/' + oid + '/trip/resume?v=' + Date.now(), {
+                method: 'POST',
+                headers: webappHeaders()
+            }).catch(function() {});
+        }
+    }
+    updateTaximeter();
 }
 
 function safeAlert(msg, cb) { alert(msg); if (cb) cb(); }
@@ -2182,7 +2201,7 @@ function updateTaximeter() {
     var distanceFare = TARIFF.startPrice + surgedDistance;
     var waitingFee = calculateWaitingFee(tripData.waitingTime);
     var uiFare = distanceFare + waitingFee;
-    if (tripData.serverFare != null) {
+    if (!tripData.isWaiting && tripData.serverFare != null) {
         if (Math.abs(tripData.serverFare - uiFare) > 100) {
             uiFare = tripData.serverFare;
         }
@@ -2207,7 +2226,9 @@ window.addEventListener('online', async () => {
             const data = await res.json();
             if (data && data.active) {
                 tripData.distance = data.distance_km || 0;
-                tripData.waitingTime = data.waiting_seconds || 0;
+                if (!tripData.isWaiting) {
+                    tripData.waitingTime = data.waiting_seconds || 0;
+                }
                 tripData.isWaiting = !!data.is_waiting;
                 tripData.surge = data.surge_multiplier != null && data.surge_multiplier !== undefined ? Number(data.surge_multiplier) : (tripData.surge || 1);
                 if (data.estimated_fare != null) tripData.serverFare = data.estimated_fare;
