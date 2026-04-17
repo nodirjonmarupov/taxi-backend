@@ -71,6 +71,7 @@ const TSVG = {
 };
 let appState = 'arriving';
 let tripData = { distance: 0, waitingTime: 0, elapsedSeconds: 0, isWaiting: false, lastPosition: null, serverFare: null, surge: 1 };
+let _resumeInFlight = false;
 let intervals = { timer: null, position: null };
 
 const API_BASE_URL = window.__WEBAPP_BASE_URL__ || window.location.origin;
@@ -2117,10 +2118,32 @@ function toggleWaiting() {
                 headers: webappHeaders()
             }).catch(function() {});
         } else {
+            _resumeInFlight = true;
+            tripData.serverFare = null;
             fetch(API_BASE_URL + '/api/webapp/order/' + oid + '/trip/resume?v=' + Date.now(), {
                 method: 'POST',
                 headers: webappHeaders()
-            }).catch(function() {});
+            })
+                .then(function() {
+                    return fetch(API_BASE_URL + '/api/webapp/order/' + oid + '/trip-meter?v=' + Date.now(), {
+                        headers: webappHeaders()
+                    });
+                })
+                .then(function(r) { return r.json(); })
+                .then(function(data) {
+                    if (data && data.active) {
+                        tripData.waitingTime = data.waiting_seconds || tripData.waitingTime;
+                        tripData.serverFare = data.estimated_fare || null;
+                    }
+                })
+                .finally(function() {
+                    _resumeInFlight = false;
+                    updateTaximeter();
+                })
+                .catch(function() {
+                    _resumeInFlight = false;
+                });
+            return;
         }
     }
     updateTaximeter();
@@ -2201,7 +2224,7 @@ function updateTaximeter() {
     var distanceFare = TARIFF.startPrice + surgedDistance;
     var waitingFee = calculateWaitingFee(tripData.waitingTime);
     var uiFare = distanceFare + waitingFee;
-    if (!tripData.isWaiting && tripData.serverFare != null) {
+    if (!tripData.isWaiting && !_resumeInFlight && tripData.serverFare != null) {
         if (Math.abs(tripData.serverFare - uiFare) > 100) {
             uiFare = tripData.serverFare;
         }
