@@ -48,6 +48,7 @@ let _snapRouteLine = null;  // trimmed forward-only snap line; rebuilt after eac
 let _lastRerouteMs = 0;    // timestamp of last reroute request (5 s cooldown)
 let _lastProgressLat = null;
 let _lastProgressLng = null;
+let _lastProgressAnchorIdx = null;
 let _lastDbgLat = null;
 let _lastDbgLng = null;
 let _lastDisplayUpdate = 0;
@@ -215,6 +216,7 @@ function handleTripSyncSuccess(item) {
         if (tg && tg.sendData) tg.sendData(JSON.stringify(payload));
         if (tg && tg.close) tg.close();
     }
+    try { localStorage.removeItem('trip_active_order_id'); } catch (_) {}
     disableWakeLock();
 }
 async function flushPendingTrips() {
@@ -846,9 +848,61 @@ function showOrderCompleted(status) {
     document.body.appendChild(overlay);
 }
 
+function activateTaximeterUI() {
+    document.body.classList.add('taximeter-mode');
+
+    var arriving = document.getElementById('arrivingPanel');
+    var taximeter = document.getElementById('taximeterScreen');
+    var mapEl = document.getElementById('map');
+
+    if (arriving) arriving.style.display = 'none';
+    if (taximeter) taximeter.classList.add('active');
+    if (mapEl) mapEl.classList.add('minimized');
+
+    var topBar = document.querySelector('.top-bar');
+    if (topBar) topBar.classList.add('hidden');
+    var navEl = document.querySelector('.nav');
+    if (navEl) navEl.classList.add('hidden');
+    var compass = document.querySelector('.compass');
+    if (compass) compass.classList.add('hidden');
+
+    var nav = ['top-bar', 'nav-bottom', 'compassBtn'];
+    for (var i = 0; i < nav.length; i++) {
+        var el = document.getElementById(nav[i]);
+        if (el) el.style.display = 'none';
+    }
+    /* Explicit hide for compass */
+    var compassEl = document.getElementById('compassBtn');
+    if (compassEl) {
+        compassEl.style.display = 'none';
+        compassEl.style.visibility = 'hidden';
+        compassEl.style.opacity = '0';
+        compassEl.style.pointerEvents = 'none';
+    }
+    /* Hide MapLibre controls */
+    document.querySelectorAll(
+        '.maplibregl-ctrl-group, .maplibregl-ctrl-compass'
+    ).forEach(function(el) {
+        el.style.display = 'none';
+    });
+    var btn2d3d = document.querySelector('.btn-2d3d');
+    if (btn2d3d) btn2d3d.style.display = 'none';
+
+    if (!intervals.timer) {
+        intervals.timer = setInterval(updateTimer, 1000);
+    }
+}
+
 async function init() {
-    await fetchClientLocation();
-    if (!ORDER_DATA) return;
+    const savedTrip = localStorage.getItem('trip_active_order_id');
+    if (!navigator.onLine && savedTrip) {
+        appState = 'trip';
+        activateTaximeterUI();
+        enableWakeLock(); // may fail silently, OK
+    } else {
+        await fetchClientLocation();
+    }
+    if (!ORDER_DATA && !(savedTrip && !navigator.onLine)) return;
 
     /* Order already completed or cancelled */
     if (ORDER_DATA.status === 'completed' || ORDER_DATA.status === 'cancelled') {
@@ -859,6 +913,7 @@ async function init() {
     /* Trip already started */
     if (ORDER_DATA.status === 'in_progress') {
         appState = 'trip';
+        activateTaximeterUI();
         enableWakeLock(); // may fail silently, OK
 
         try {
@@ -879,14 +934,8 @@ async function init() {
                 }
                 updateTaximeter();
             }
-            // #region agent log
-            fetch('http://127.0.0.1:7602/ingest/b6487788-bee6-445f-81f9-95a1b43ce854',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'4d6510'},body:JSON.stringify({sessionId:'4d6510',runId:'trip-restore',hypothesisId:'H_restore',location:'app/static/main.js:init',message:'trip_restore',data:{orderId:oid,ok:!!(data&&data.active),distance_km:(data&&data.distance_km)||0,waiting_seconds:(data&&data.waiting_seconds)||0,is_waiting:!!(data&&data.is_waiting)},timestamp:Date.now()})}).catch(()=>{});
-            // #endregion agent log
         } catch (e) {
             console.warn('Trip restore failed', e);
-            // #region agent log
-            fetch('http://127.0.0.1:7602/ingest/b6487788-bee6-445f-81f9-95a1b43ce854',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'4d6510'},body:JSON.stringify({sessionId:'4d6510',runId:'trip-restore',hypothesisId:'H_restore_err',location:'app/static/main.js:init',message:'trip_restore_error',data:{err:String(e&&e.message?e.message:e)},timestamp:Date.now()})}).catch(()=>{});
-            // #endregion agent log
         }
     }
 
@@ -1273,9 +1322,6 @@ function setTurnAndDistFromDriver(driverPos) {
 }
 function updateDriverMarker(lat, lng, heading) {
     try {
-        // #region agent log
-        fetch('http://127.0.0.1:7602/ingest/b6487788-bee6-445f-81f9-95a1b43ce854',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'4d6510'},body:JSON.stringify({sessionId:'4d6510',runId:'pre-fix',hypothesisId:'H_entry',location:'app/static/main.js:updateDriverMarker',message:'enter',data:{appState:appState,hasLastPos:!!(tripData&&tripData.lastPosition),spd_kmh:spd},timestamp:Date.now()})}).catch(()=>{});
-        // #endregion agent log
         if (!map || !ORDER_DATA) return;
         if (!isValidCoord(lat, lng)) return;
         // Route not loaded yet AND marker already created ??queue and wait.
@@ -1494,9 +1540,6 @@ function updateDriverMarker(lat, lng, heading) {
                 ) / 1000;
                 // MICRO NOISE FILTER
                 if (segD < 0.005) {
-                    // #region agent log
-                    fetch('http://127.0.0.1:7602/ingest/b6487788-bee6-445f-81f9-95a1b43ce854',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'4d6510'},body:JSON.stringify({sessionId:'4d6510',runId:'pre-fix',hypothesisId:'H_early',location:'app/static/main.js:tripDistance',message:'micro_return_taken',data:{segD_m:segD*1000,spd_kmh:spd},timestamp:Date.now()})}).catch(()=>{});
-                    // #endregion agent log
                 } else {
                     // MAIN ACCUMULATION
                     if (segD > 0.007 && segD < 1) {
@@ -1510,9 +1553,6 @@ function updateDriverMarker(lat, lng, heading) {
                 tripData.lastPosition = driverPos;
             }
         }
-        // #region agent log
-        fetch('http://127.0.0.1:7602/ingest/b6487788-bee6-445f-81f9-95a1b43ce854',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'4d6510'},body:JSON.stringify({sessionId:'4d6510',runId:'pre-fix',hypothesisId:'H_exit',location:'app/static/main.js:updateDriverMarker',message:'exit_reached',data:{appState:appState,spd_kmh:spd},timestamp:Date.now()})}).catch(()=>{});
-        // #endregion agent log
         checkOffRoute(lat, lng);
     } catch (e) {}
 }
@@ -1649,6 +1689,10 @@ function safeAddRouteABLayer(routeGeoJSON) {
     }
 }
 
+function resetRouteProgress() {
+    _lastProgressAnchorIdx = null;
+}
+
 function drawRoute(from, to) {
     if (!map || !from || !to) return;
     routeRoadDistanceKm = null;
@@ -1697,6 +1741,7 @@ function drawRoute(from, to) {
             if (r.geometry && r.geometry.coordinates) {
                 routeCoordinates = r.geometry.coordinates.map(function(c) { return [c[1], c[0]]; }); // [lat,lng]
                 _driverRouteCoords = r.geometry.coordinates.slice(); // [lon,lat] GeoJSON tartib
+                resetRouteProgress();
             }
             if (!routeCoordinates.length) {
                 fallbackStraightLine(fromLat, fromLng, toLat, toLng);
@@ -1779,29 +1824,23 @@ function drawRoute(from, to) {
  * driverLon, driverLat ??snapped yoki GPS koordinatalar [lon, lat].
  */
 function updateProgressiveRoute(driverLon, driverLat) {
-    if (typeof turf === 'undefined') return;
-    if (!_driverRouteLine || !_driverRouteCoords || _driverRouteCoords.length < 2) return;
-    if (_lastProgressLat !== null) {
-        var _progMoveDist = haversineM(driverLat, driverLon, _lastProgressLat, _lastProgressLng);
-        if (_progMoveDist < 10) return;
-    }
+    if (!_driverRouteCoords || _driverRouteCoords.length < 2) return;
+    if (typeof _routeAnchorIdx !== 'number' || isNaN(_routeAnchorIdx)) return;
+
+    var idx = Math.max(0, Math.min(_routeAnchorIdx, _driverRouteCoords.length - 2));
+    if (_lastProgressAnchorIdx !== null && idx <= _lastProgressAnchorIdx) return;
+
+    var remainingCoords = _driverRouteCoords.slice(idx);
+    if (!remainingCoords || remainingCoords.length < 2) return;
+
+    // [lon,lat] -> [lat,lng] for buildRouteGeoJSON
+    var trimCoords = remainingCoords.map(function(c) { return [c[1], c[0]]; });
+    var geo = buildRouteGeoJSON(trimCoords);
+    safeAddRouteLayer(geo);
+
+    _lastProgressAnchorIdx = idx;
     _lastProgressLat = driverLat;
     _lastProgressLng = driverLon;
-    try {
-        var drvPt = turf.point([driverLon, driverLat]);
-        var snapped = turf.nearestPointOnLine(_driverRouteLine, drvPt, { units: 'kilometers' });
-        if (!snapped || !snapped.geometry) return;
-        // Manzil (pickup) = marshrutning oxirgi nuqtasi [lon, lat]
-        var destCoord = _driverRouteCoords[_driverRouteCoords.length - 1];
-        var destPt = turf.point(destCoord);
-        // Haydovchi dan manzilga qadar qolgan yo'l
-        var remaining = turf.lineSlice(snapped, destPt, _driverRouteLine);
-        if (!remaining || !remaining.geometry || !remaining.geometry.coordinates || remaining.geometry.coordinates.length < 2) return;
-        // [lon,lat] ??[lat,lng] konversiya
-        var trimCoords = remaining.geometry.coordinates.map(function(c) { return [c[1], c[0]]; });
-        var geo = buildRouteGeoJSON(trimCoords);
-        safeAddRouteLayer(geo);
-    } catch (_) {}
 }
 
 function fallbackStraightLine(fromLat, fromLng, toLat, toLng) {
@@ -1809,6 +1848,7 @@ function fallbackStraightLine(fromLat, fromLng, toLat, toLng) {
     // Build _driverRouteLine so the queue gate is satisfied and snapping works
     // on the straight-line fallback exactly the same as on a real OSRM route.
     _driverRouteCoords = [[fromLng, fromLat], [toLng, toLat]];
+    resetRouteProgress();
     if (typeof turf !== 'undefined' && _driverRouteCoords.length >= 2) {
         try { _driverRouteLine = turf.lineString(_driverRouteCoords); } catch (_) {}
     }
@@ -1854,6 +1894,7 @@ function checkOffRoute(lat, lng) {
             // Reset snap state so next GPS anchors to the new route.
             _firstSnapDone = false;
             _routeAnchorIdx = 0;
+            resetRouteProgress();
             console.log('[ANCHOR UPDATE]', _routeAnchorIdx);
             _snapRouteLine = null;
             drawRoute(
@@ -1938,6 +1979,10 @@ async function handleStartTrip() {
     document.body.classList.add('taximeter-mode');
     appState = 'trip';
     enableWakeLock();
+    try {
+        var _oid = (ORDER_DATA && ORDER_DATA.id != null) ? ORDER_DATA.id : ORDER_ID_CURRENT;
+        if (_oid) localStorage.setItem('trip_active_order_id', String(_oid));
+    } catch (_) {}
     /* Draw route from current position to destination */
     if (ORDER_DATA &&
         ORDER_DATA.destination_latitude != null &&
@@ -2031,6 +2076,7 @@ async function finishTrip() {
     if (stillPending) {
         safeAlert("Internet yo'q yoki server javob bermadi. Ma'lumot saqlandi ??ulanish tiklanganda avtomatik yuboriladi.");
     } else {
+        try { localStorage.removeItem('trip_active_order_id'); } catch (_) {}
         disableWakeLock();
     }
 }
@@ -2060,9 +2106,27 @@ function updateTaximeter() {
     if (tripDistEl) tripDistEl.textContent = tripData.distance.toFixed(2);
 }
 
-window.addEventListener('online', function() {
+window.addEventListener('online', async () => {
     updateSyncUI();
     flushPendingTrips();
+    if (appState === 'trip' && ORDER_DATA && ORDER_DATA.id) {
+        try {
+            const res = await fetch(
+                API_BASE_URL + '/api/webapp/order/' + ORDER_DATA.id + '/trip-meter?v=' + Date.now(),
+                { headers: webappHeaders() }
+            );
+            if (!res.ok) return;
+            const data = await res.json();
+            if (data && data.active) {
+                tripData.distance = data.distance_km || 0;
+                tripData.waitingTime = data.waiting_seconds || 0;
+                tripData.isWaiting = !!data.is_waiting;
+                updateTaximeter();
+            }
+        } catch (e) {
+            console.warn('Online resync failed', e);
+        }
+    }
 });
 window.addEventListener('offline', function() {
     updateSyncUI();
