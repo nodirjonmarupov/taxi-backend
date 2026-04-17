@@ -709,6 +709,8 @@ async def trip_meter(
             int(s.min_price), int(s.price_per_km), int(s.price_per_min_waiting)
         )
     est = compute_fare(snap, float(st.get("distance_km") or 0), float(st.get("waiting_seconds") or 0))
+    _raw_surge = float(snap.get("surge_multiplier") or 1.0)
+    _surge_out = max(1.0, min(2.0, _raw_surge))
     return {
         "active": True,
         "distance_km": float(st.get("distance_km") or 0),
@@ -716,6 +718,7 @@ async def trip_meter(
         "estimated_fare": int(est),
         "is_waiting": bool(st.get("is_waiting")),
         "status": st.get("status"),
+        "surge_multiplier": _surge_out,
     }
 
 

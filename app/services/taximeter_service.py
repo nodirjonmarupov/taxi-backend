@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from copy import deepcopy
 from datetime import datetime
+from math import ceil
 from decimal import Decimal, ROUND_HALF_UP
 from typing import Any, Dict, Optional, Union
 
@@ -27,6 +28,10 @@ MAX_SPEED_KMH = 160.0
 WAITING_SPEED_KMH = 5.0
 DEFAULT_ROUND_STEP_SOM = Decimal("100")
 PRICE_TOLERANCE = Decimal("0.02")
+
+# Tiered waiting-time fee (so'm), server-authoritative — not linear price_per_min_waiting.
+WAITING_FIRST_MIN = 1000
+WAITING_NEXT_MIN = 500
 
 # Time-based surge floor: 22:00–06:00 (server local time, naive datetime).
 TIME_SURGE_NIGHT_MIN = 1.2
@@ -82,6 +87,18 @@ def billing_fallback_tariff_no_stored_snapshot(
     }
 
 
+def compute_waiting_fee(waiting_seconds: Union[int, float]) -> int:
+    """
+    Tiered idle/waiting charge (so'm):
+      first billed minute → WAITING_FIRST_MIN, each additional full minute → WAITING_NEXT_MIN.
+    Uses ceil(waiting_seconds / 60) for minute blocks.
+    """
+    if not waiting_seconds or float(waiting_seconds) <= 0:
+        return 0
+    minutes = ceil(float(waiting_seconds) / 60.0)
+    return WAITING_FIRST_MIN + max(0, minutes - 1) * WAITING_NEXT_MIN
+
+
 def compute_fare(
     tariff_snapshot: Dict[str, Any],
     distance_km: Union[float, Decimal],
@@ -90,21 +107,22 @@ def compute_fare(
 ) -> Decimal:
     """
     Billing (frozen tariff_snapshot per trip, Decimal math):
-      subtotal = base + (distance_km * km_price) + (waiting_seconds / 60 * wait_price)
-      total = subtotal * surge_multiplier   # from snapshot, default 1; surge clamped [1,2] here
-    Then round to round_to (default 100 so'm).
+      distance_charge = distance_km * km_price * surge_multiplier  # surge on km only
+      waiting_fee = tiered compute_waiting_fee(waiting_seconds)   # not surged
+      total = base + distance_charge + waiting_fee
+    Surge clamped [1,2] here. Then round to round_to (default 100 so'm).
     """
     base = Decimal(str(tariff_snapshot.get("base", 0)))
     km_p = Decimal(str(tariff_snapshot.get("km", 0)))
-    wait_p = Decimal(str(tariff_snapshot.get("wait", 0)))
     surge = Decimal(str(tariff_snapshot.get("surge_multiplier", 1)))
     surge = max(Decimal("1.0"), surge)
     surge = min(Decimal("2.0"), surge)
     d_km = Decimal(str(distance_km))
-    w_sec = Decimal(str(waiting_seconds))
 
-    subtotal = base + (d_km * km_p) + ((w_sec / Decimal("60")) * wait_p)
-    total = subtotal * surge
+    waiting_fee = Decimal(str(compute_waiting_fee(waiting_seconds)))
+    distance_part = d_km * km_p
+    surged_distance = distance_part * surge
+    total = base + surged_distance + waiting_fee
     if round_to <= 0:
         return total
     q = (total / round_to).quantize(Decimal("1"), rounding=ROUND_HALF_UP) * round_to

@@ -45,7 +45,10 @@ let _lastStableLng = null;
 let _pendingGps = null;    // queued GPS update received before _driverRouteLine was ready
 let _firstSnapDone = false; // true after the first successful Turf snap; guards dead zone
 let _snapRouteLine = null;  // trimmed forward-only snap line; rebuilt after each snap
-let _lastRerouteMs = 0;    // timestamp of last reroute request (5 s cooldown)
+let _offRouteCount = 0;       // consecutive GPS samples past off-route threshold (noise filter)
+let _lastRerouteTime = 0;     // last reroute attempt timestamp (cooldown)
+let _rerouteInFlight = false; // single in-flight OSRM request for reroute
+let _routeInFlight = false;   // global mutex: any drawRoute OSRM fetch
 let _lastProgressLat = null;
 let _lastProgressLng = null;
 let _lastProgressAnchorIdx = null;
@@ -67,7 +70,7 @@ const TSVG = {
     arrive: '<path d="M12 2C8.13 2 5 5.13 5 9c0 5.25 7 13 7 13s7-7.75 7-13c0-3.87-3.13-7-7-7zm0 9.5c-1.38 0-2.5-1.12-2.5-2.5s1.12-2.5 2.5-2.5 2.5 1.12 2.5 2.5-1.12 2.5-2.5 2.5z"/>'
 };
 let appState = 'arriving';
-let tripData = { distance: 0, waitingTime: 0, elapsedSeconds: 0, isWaiting: false, lastPosition: null };
+let tripData = { distance: 0, waitingTime: 0, elapsedSeconds: 0, isWaiting: false, lastPosition: null, serverFare: null, surge: 1 };
 let intervals = { timer: null, position: null };
 
 const API_BASE_URL = window.__WEBAPP_BASE_URL__ || window.location.origin;
@@ -929,6 +932,8 @@ async function init() {
                 tripData.distance = data.distance_km || 0;
                 tripData.waitingTime = data.waiting_seconds || 0;
                 tripData.isWaiting = !!data.is_waiting;
+                tripData.surge = data.surge_multiplier != null && data.surge_multiplier !== undefined ? Number(data.surge_multiplier) : (tripData.surge || 1);
+                if (data.estimated_fare != null) tripData.serverFare = data.estimated_fare;
                 if (data.elapsed_seconds != null && !isNaN(Number(data.elapsed_seconds))) {
                     tripData.elapsedSeconds = Number(data.elapsed_seconds) || 0;
                 }
@@ -1553,7 +1558,7 @@ function updateDriverMarker(lat, lng, heading) {
                 tripData.lastPosition = driverPos;
             }
         }
-        checkOffRoute(lat, lng);
+        checkOffRoute(lat, lng, speedKmh);
     } catch (e) {}
 }
 
@@ -1694,7 +1699,9 @@ function resetRouteProgress() {
 }
 
 function drawRoute(from, to) {
-    if (!map || !from || !to) return;
+    if (!map || !from || !to) return Promise.resolve(false);
+    if (_routeInFlight) return Promise.resolve(false);
+    _routeInFlight = true;
     routeRoadDistanceKm = null;
     routeInstructions = [];
     routeCoordinates = [];
@@ -1713,12 +1720,14 @@ function drawRoute(from, to) {
     var controller = new AbortController();
     var timeoutId = setTimeout(function() { controller.abort(); }, 8000);
 
+    var p = new Promise(function(resolve, reject) {
     fetch(url, { signal: controller.signal })
         .then(function(r) { return r.json(); })
         .then(function(data) {
             clearTimeout(timeoutId);
             if (!data || !data.routes || !data.routes.length) {
                 fallbackStraightLine(fromLat, fromLng, toLat, toLng);
+                resolve(true);
                 return;
             }
             var r = data.routes[0];
@@ -1745,6 +1754,7 @@ function drawRoute(from, to) {
             }
             if (!routeCoordinates.length) {
                 fallbackStraightLine(fromLat, fromLng, toLat, toLng);
+                resolve(true);
                 return;
             }
             // Turf line feature qurish (snapping va progressive trim uchun)
@@ -1811,11 +1821,19 @@ function drawRoute(from, to) {
             safeAddRouteLayer(routeGeoJSON);
             setTurnAndDistFromDriver({ lat: fromLat, lng: fromLng });
             updateNavUI();
+            resolve(true);
         })
-        .catch(function() {
+        .catch(function(err) {
             clearTimeout(timeoutId);
-            fallbackStraightLine(fromLat, fromLng, toLat, toLng);
+            try {
+                fallbackStraightLine(fromLat, fromLng, toLat, toLng);
+            } catch (_) {}
+            reject(err || new Error('Route fetch failed'));
         });
+    });
+    return p.finally(function() {
+        _routeInFlight = false;
+    });
 }
 
 /**
@@ -1869,19 +1887,50 @@ function fallbackStraightLine(fromLat, fromLng, toLat, toLng) {
 
 /**
  * Off-route detection: called after every GPS update during a trip.
- * Uses turf.pointToLineDistance to measure perpendicular distance from
- * the raw GPS fix to _driverRouteLine. If > 70 m and the 5-second
- * cooldown has elapsed, a fresh OSRM route is requested and the map
- * polyline is replaced. Snap state is reset so the driver snaps cleanly
- * to the new route on the next GPS update.
+ * Uses turf.pointToLineDistance from the raw GPS fix to _driverRouteLine.
+ * Requires two consecutive samples >= 30 m before tryReroute (reduces GPS spike false positives).
+ * tryReroute applies cooldown, in-flight guard, then drawRoute.
  */
-function checkOffRoute(lat, lng) {
+async function tryReroute(lat, lng) {
+    var now = Date.now();
+    if (now - _lastRerouteTime < 5000) return false;
+    if (_rerouteInFlight) return false;
+    if (_routeInFlight) return false;
+
+    _rerouteInFlight = true;
+    _lastRerouteTime = now;
+
+    try {
+        _firstSnapDone = false;
+        _routeAnchorIdx = 0;
+        resetRouteProgress();
+        console.log('[ANCHOR UPDATE]', _routeAnchorIdx);
+        _snapRouteLine = null;
+        var routed = await drawRoute(
+            { lat: lat, lng: lng },
+            {
+                lat: ORDER_DATA.destination_latitude,
+                lng: ORDER_DATA.destination_longitude
+            }
+        );
+        if (!routed) return false;
+        return true;
+    } catch (e) {
+        console.warn('Reroute failed', e);
+        _lastRerouteTime = Date.now() - 3000;
+        return false;
+    } finally {
+        _rerouteInFlight = false;
+    }
+}
+
+function checkOffRoute(lat, lng, speed) {
     if (appState !== 'trip') return;
     if (typeof turf === 'undefined') return;
     if (!_driverRouteLine || !_driverRouteLine.geometry) return;
     if (!ORDER_DATA ||
         !isValidCoord(ORDER_DATA.destination_latitude, ORDER_DATA.destination_longitude)) return;
-    if (Date.now() - _lastRerouteMs < 5000) return;
+    if (typeof speed !== 'undefined' && speed !== null && !isNaN(speed) && speed < 3) return;
 
     try {
         var distM = turf.pointToLineDistance(
@@ -1889,18 +1938,18 @@ function checkOffRoute(lat, lng) {
             _driverRouteLine,
             { units: 'meters' }
         );
-        if (distM > 70) {
-            _lastRerouteMs = Date.now();
-            // Reset snap state so next GPS anchors to the new route.
-            _firstSnapDone = false;
-            _routeAnchorIdx = 0;
-            resetRouteProgress();
-            console.log('[ANCHOR UPDATE]', _routeAnchorIdx);
-            _snapRouteLine = null;
-            drawRoute(
-                { lat: lat, lng: lng },
-                { lat: ORDER_DATA.destination_latitude, lng: ORDER_DATA.destination_longitude }
-            );
+        if (distM >= 30) {
+            _offRouteCount++;
+        } else {
+            _offRouteCount = 0;
+        }
+
+        if (_offRouteCount >= 2) {
+            tryReroute(lat, lng).then(function(triggered) {
+                if (triggered) {
+                    _offRouteCount = 0;
+                }
+            });
         }
     } catch (_) {}
 }
@@ -2024,6 +2073,28 @@ async function handleStartTrip() {
     intervals.timer = setInterval(updateTimer, 1000);
     updateTaximeter();
     updateSyncUI();
+    try {
+        var _tmOid = (ORDER_DATA && ORDER_DATA.id != null) ? ORDER_DATA.id : ORDER_ID_CURRENT;
+        if (_tmOid && WEBAPP_TOKEN) {
+            var _tmRes = await fetch(
+                API_BASE_URL + '/api/webapp/order/' + _tmOid + '/trip-meter?v=' + Date.now(),
+                { headers: webappHeaders() }
+            );
+            if (_tmRes.ok) {
+                var _tmData = await _tmRes.json();
+                if (_tmData && _tmData.active) {
+                    if (_tmData.distance_km != null) tripData.distance = _tmData.distance_km;
+                    if (_tmData.waiting_seconds != null) tripData.waitingTime = _tmData.waiting_seconds;
+                    tripData.isWaiting = !!_tmData.is_waiting;
+                    tripData.surge = _tmData.surge_multiplier != null && _tmData.surge_multiplier !== undefined
+                        ? Number(_tmData.surge_multiplier)
+                        : (tripData.surge || 1);
+                    if (_tmData.estimated_fare != null) tripData.serverFare = _tmData.estimated_fare;
+                    updateTaximeter();
+                }
+            }
+        }
+    } catch (_tmE) {}
 }
 
 function toggleWaiting() {
@@ -2097,9 +2168,26 @@ function updateTimer() {
     updateTaximeter();
 }
 
+/** Tiered waiting fee (so'm) — keep in sync with server compute_waiting_fee. */
+function calculateWaitingFee(waitingSeconds) {
+    if (!waitingSeconds || waitingSeconds <= 0) return 0;
+    var minutes = Math.ceil(waitingSeconds / 60);
+    return 1000 + Math.max(0, minutes - 1) * 500;
+}
+
 function updateTaximeter() {
-    const fare = TARIFF.startPrice + (tripData.distance * TARIFF.pricePerKm) + ((tripData.waitingTime / 60) * TARIFF.pricePerMinWaiting);
-    const rounded = Math.round(fare / 100) * 100;
+    var surge = tripData.surge != null && !isNaN(Number(tripData.surge)) ? Number(tripData.surge) : 1;
+    var distancePart = tripData.distance * TARIFF.pricePerKm;
+    var surgedDistance = distancePart * surge;
+    var distanceFare = TARIFF.startPrice + surgedDistance;
+    var waitingFee = calculateWaitingFee(tripData.waitingTime);
+    var uiFare = distanceFare + waitingFee;
+    if (tripData.serverFare != null) {
+        if (Math.abs(tripData.serverFare - uiFare) > 100) {
+            uiFare = tripData.serverFare;
+        }
+    }
+    var rounded = Math.round(uiFare / 100) * 100;
     var curFareEl = document.getElementById('currentFare');
     var tripDistEl = document.getElementById('tripDistance');
     if (curFareEl) curFareEl.textContent = rounded.toLocaleString('en-US');
@@ -2121,6 +2209,8 @@ window.addEventListener('online', async () => {
                 tripData.distance = data.distance_km || 0;
                 tripData.waitingTime = data.waiting_seconds || 0;
                 tripData.isWaiting = !!data.is_waiting;
+                tripData.surge = data.surge_multiplier != null && data.surge_multiplier !== undefined ? Number(data.surge_multiplier) : (tripData.surge || 1);
+                if (data.estimated_fare != null) tripData.serverFare = data.estimated_fare;
                 updateTaximeter();
             }
         } catch (e) {
