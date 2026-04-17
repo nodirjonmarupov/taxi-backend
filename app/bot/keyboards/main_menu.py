@@ -5,7 +5,7 @@ from app.bot.messages import get_text
 
 
 def get_main_keyboard(lang: str = "uz") -> ReplyKeyboardMarkup:
-    """Taksi, buyurtmalar, ma'lumot. Haydovchi ro'yxati: /driver."""
+    """Taksi, buyurtmalar, ma'lumot. Birinchi qator — asosiy CTA (bitta tugma). Haydovchi: /driver."""
     t = lambda k: get_text(lang, k)
     buttons = [
         [KeyboardButton(text=t("btn_order"))],

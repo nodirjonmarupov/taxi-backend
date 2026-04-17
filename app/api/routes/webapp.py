@@ -763,6 +763,11 @@ async def update_driver_location_api(
             raise HTTPException(status_code=403, detail="Token driver_id mismatch")
 
     redis = get_redis()
+    if redis is not None:
+        try:
+            redis.set(f"web_active:{driver.id}", "1", ex=30)
+        except Exception as e:
+            logger.error(f"Failed to set web_active for driver {driver.id}: {e}")
     # Snapped koordinata mavjud bo'lsa — uni saqlash, aks holda raw GPS
     store_lat = body.snapped_latitude if body.snapped_latitude is not None else body.latitude
     store_lon = body.snapped_longitude if body.snapped_longitude is not None else body.longitude

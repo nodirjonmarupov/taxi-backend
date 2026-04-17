@@ -46,6 +46,10 @@ class UserStates(StatesGroup):
 async def send_main_menu(message: Message, *, lang: str, is_driver: bool, name: str) -> None:
     """Main menyu faqat /start handlerida ko'rsatiladi."""
     keyboard = get_main_keyboard(lang)
+    await message.answer(
+        get_text(lang, "main_menu_cta"),
+        parse_mode="HTML",
+    )
     if is_driver:
         await message.answer(
             get_text(lang, "welcome_driver", name=name),
@@ -139,7 +143,17 @@ async def lang_selected(callback: CallbackQuery, state: FSMContext, lang: str = 
         await callback.answer(get_text("uz", "error"), show_alert=True)
 
 
-@user_router.message(F.text.in_({"🚕 Taksi chaqirish", "🚕 Заказать такси", "🚕 Такси чақириш"}))
+ORDER_TAXI_BUTTON_TEXTS = {
+    "🚕 TAKSI CHAQRISH",
+    "🚕 Taksi chaqirish",
+    "🚕 ЗАКАЗАТЬ ТАКСИ",
+    "🚕 Заказать такси",
+    "🚕 ТАКСИ ЧАҚИРИШ",
+    "🚕 Такси чақириш",
+}
+
+
+@user_router.message(F.text.in_(ORDER_TAXI_BUTTON_TEXTS))
 async def order_taxi(message: Message, state: FSMContext, lang: str = "uz"):
     """Taksi buyurtma boshlash"""
     await message.answer(

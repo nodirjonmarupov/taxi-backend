@@ -15,6 +15,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 
 from app.core.database import AsyncSessionLocal
+from app.core.redis import get_redis
 from app.crud.user import UserCRUD, DriverCRUD
 from app.models.user import UserRole
 from app.models.order import Order, OrderStatus
@@ -45,6 +46,18 @@ from app.bot.lang_utils import db_lang_for_telegram
 logger = get_logger(__name__)
 
 driver_router = Router()
+
+
+def is_web_active(driver_id: int) -> bool:
+    """WebApp GPS hozir ustun (Redis web_active kaliti)."""
+    try:
+        r = get_redis()
+        if not r:
+            return False
+        return bool(r.get(f"web_active:{driver_id}"))
+    except Exception as e:
+        logger.warning(f"web_active check failed: {e}")
+        return False
 
 # Live location optimization cache
 _last_saved_location: dict = {}  # {driver_id: (lat, lng, timestamp)}
@@ -896,13 +909,21 @@ async def update_location(message: Message, lang: str = "uz"):
             if not driver or not getattr(driver, "is_active", True):
                 return
 
+            if is_web_active(driver.id):
+                return
+
             if not driver.is_available or driver.status != 'active':
                 return
 
             lat = message.location.latitude
             lon = message.location.longitude
 
+            if is_web_active(driver.id):
+                return
+
             # PostGIS/Geography uchun location + location_updated_at ham yangilanadi
+            if is_web_active(driver.id):
+                return
             await db.execute(
                 text("""
                     UPDATE drivers
@@ -915,6 +936,8 @@ async def update_location(message: Message, lang: str = "uz"):
                 """),
                 {"driver_id": driver.id, "lat": lat, "lon": lon},
             )
+            if is_web_active(driver.id):
+                return
             await accumulate_order_distance_for_driver(db, driver.id, lat, lon)
             await db.commit()
 
@@ -945,6 +968,9 @@ async def live_location_update(message: Message):
             if not driver:
                 return
 
+            if is_web_active(driver.id):
+                return
+
             # Skip if driver is offline — save DB resources
             if not driver.is_available or driver.status != 'active':
                 logger.debug(
@@ -965,7 +991,12 @@ async def live_location_update(message: Message):
             )
             in_progress = trip_row.scalar_one_or_none() is not None
 
+            if is_web_active(driver.id):
+                return
+
             if in_progress:
+                if is_web_active(driver.id):
+                    return
                 await db.execute(
                     text("""
                         UPDATE drivers
@@ -978,6 +1009,8 @@ async def live_location_update(message: Message):
                     """),
                     {"driver_id": driver.id, "lat": lat, "lon": lon},
                 )
+                if is_web_active(driver.id):
+                    return
                 await accumulate_order_distance_for_driver(db, driver.id, lat, lon)
                 await db.commit()
                 logger.info(
@@ -1001,6 +1034,8 @@ async def live_location_update(message: Message):
             # Save current location to cache
             _last_saved_location[driver.id] = (lat, lon, now)
 
+            if is_web_active(driver.id):
+                return
             await db.execute(
                 text("""
                     UPDATE drivers
