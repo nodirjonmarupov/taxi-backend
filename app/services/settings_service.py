@@ -2,8 +2,10 @@
 Settings: faqat DB (id=1). Runtime uchun qat'iy — soxta defaultlar yo'q.
 """
 import json
+import math
 from dataclasses import dataclass
-from typing import Optional
+from datetime import datetime, timezone
+from typing import Any, Optional
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -73,6 +75,36 @@ def _tariff_from_row(r) -> TariffSettings:
         max_bonus_cap=float(r[7] if r[7] is not None else 0.0),
         price_per_min_waiting=float(r[8] if r[8] is not None else 0.0),
     )
+
+
+def _setting_values_equal(a: Any, b: Any) -> bool:
+    """Floatlar uchun epsilon; bool / 0 / 1 aralashmasini moslashtiradi."""
+    if isinstance(a, bool) and isinstance(b, bool):
+        return a == b
+    if isinstance(a, bool) or isinstance(b, bool):
+        return bool(a) == bool(b)
+    try:
+        fa, fb = float(a), float(b)
+        if not (math.isfinite(fa) and math.isfinite(fb)):
+            return False
+        return abs(fa - fb) < 1e-9
+    except (TypeError, ValueError):
+        return a == b
+
+
+def _drop_noop_updates(
+    current: TariffSettings, updates: dict[str, Any]
+) -> dict[str, Any]:
+    """DB bilan bir xil bo'lgan o'zgarishlarni tashlab yuboradi (ortiqcha UPSERT oldini olish)."""
+    cur = current.to_dict()
+    out = {}
+    for k, v in updates.items():
+        if k not in cur:
+            out[k] = v
+            continue
+        if not _setting_values_equal(cur[k], v):
+            out[k] = v
+    return out
 
 
 def _tariff_from_flat_dict(d: dict) -> TariffSettings:
@@ -188,13 +220,10 @@ async def update_settings(
     max_bonus_cap: Optional[float] = None,
     price_per_min_waiting: Optional[float] = None,
     admin_user_id: Optional[int] = None,
+    log_context: Optional[dict] = None,
 ) -> TariffSettings:
-    redis = get_redis()
-    if redis:
-        try:
-            redis.delete(REDIS_SETTINGS_KEY)
-        except Exception:
-            pass
+    ts = datetime.now(timezone.utc).isoformat()
+    ctx = log_context or {}
 
     current = await get_settings(db)
     updates = {}
@@ -217,10 +246,40 @@ async def update_settings(
     if price_per_min_waiting is not None:
         updates["price_per_min_waiting"] = price_per_min_waiting
 
+    raw_requested = dict(updates)
+    updates = _drop_noop_updates(current, updates)
+
+    logger.info(
+        "[SETTINGS_UPDATE] ts=%s route=%s ip=%s admin_user_id=%s raw_requested=%s effective_after_noop_filter=%s",
+        ts,
+        ctx.get("route", "?"),
+        ctx.get("client_ip", "?"),
+        admin_user_id,
+        json.dumps(raw_requested, default=str),
+        json.dumps(updates, default=str),
+    )
+
     if not updates:
+        logger.info(
+            "[SETTINGS_UPDATE] no_op (hech narsa o'zgarmagan yoki barcha qiymatlar DB bilan bir xil) ts=%s",
+            ts,
+        )
         return current
 
+    redis = get_redis()
+    if redis:
+        try:
+            redis.delete(REDIS_SETTINGS_KEY)
+        except Exception:
+            pass
+
     new_values = {**current.to_dict(), **updates}
+
+    logger.info(
+        "[SETTINGS_UPDATE] ts=%s will_upsert_new_values=%s",
+        ts,
+        json.dumps(new_values, default=str),
+    )
     await db.execute(
         text(
             """

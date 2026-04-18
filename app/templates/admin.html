@@ -373,44 +373,97 @@ function renderChart(dailyStats) {
     });
 }
 
+/** Tariflar: serverdan kelgan snapshot (faqat o'zgargan maydonlarni PUT qilish uchun) */
+var tariffOriginal = null;
+
+function _numEq(a, b) {
+    if (!Number.isFinite(a) && !Number.isFinite(b)) return true;
+    if (!Number.isFinite(a) || !Number.isFinite(b)) return false;
+    return Math.abs(a - b) < 1e-6;
+}
+
+function snapshotTariffsFromForm() {
+    const cbRaw = parseFloat(document.getElementById('cashbackPercent').value);
+    const maxBRaw = parseFloat(document.getElementById('maxBonusUsagePercent').value);
+    return {
+        min_price: parseFloat(document.getElementById('minPrice').value),
+        price_per_km: parseFloat(document.getElementById('pricePerKm').value),
+        commission_rate: parseFloat(document.getElementById('commissionRate').value),
+        surge_multiplier: parseFloat(document.getElementById('surgeMult').value),
+        is_surge_active: document.getElementById('surgeActive').checked,
+        cashback_percent: Number.isFinite(cbRaw) ? cbRaw : 0,
+        max_bonus_usage_percent: Number.isFinite(maxBRaw) ? maxBRaw : 0
+    };
+}
+
+function snapshotTariffsFromServer(s) {
+    const cb = (typeof s.cashback_percent === 'number' && isFinite(s.cashback_percent)) ? s.cashback_percent : 0;
+    const maxB = (typeof s.max_bonus_usage_percent === 'number' && isFinite(s.max_bonus_usage_percent)) ? s.max_bonus_usage_percent : 0;
+    return {
+        min_price: Number(s.min_price),
+        price_per_km: Number(s.price_per_km),
+        commission_rate: Number(s.commission_rate),
+        surge_multiplier: Number(s.surge_multiplier),
+        is_surge_active: !!s.is_surge_active,
+        cashback_percent: cb,
+        max_bonus_usage_percent: maxB
+    };
+}
+
+function applyTariffsToForm(s) {
+    document.getElementById('minPrice').value = s.min_price;
+    document.getElementById('pricePerKm').value = s.price_per_km;
+    document.getElementById('commissionRate').value = s.commission_rate;
+    document.getElementById('surgeMult').value = s.surge_multiplier;
+    document.getElementById('surgeActive').checked = s.is_surge_active;
+    const cb = (typeof s.cashback_percent === 'number' && isFinite(s.cashback_percent)) ? s.cashback_percent : 0;
+    const maxB = (typeof s.max_bonus_usage_percent === 'number' && isFinite(s.max_bonus_usage_percent)) ? s.max_bonus_usage_percent : 0;
+    const cbInput = document.getElementById('cashbackPercent');
+    const maxBInput = document.getElementById('maxBonusUsagePercent');
+    if (cbInput) cbInput.value = cb;
+    if (maxBInput) maxBInput.value = maxB;
+}
+
+/** Faqat formda o'zgan maydonlar (ortiqcha UPSERT / kesh muammolarini kamaytirish) */
+function buildTariffsDiffPayload() {
+    const cur = snapshotTariffsFromForm();
+    if (!tariffOriginal) return cur;
+    const body = {};
+    const keys = ['min_price','price_per_km','commission_rate','surge_multiplier','is_surge_active','cashback_percent','max_bonus_usage_percent'];
+    for (let i = 0; i < keys.length; i++) {
+        const k = keys[i];
+        if (k === 'is_surge_active') {
+            if (cur[k] !== tariffOriginal[k]) body[k] = cur[k];
+        } else {
+            if (!_numEq(cur[k], tariffOriginal[k])) body[k] = cur[k];
+        }
+    }
+    return body;
+}
+
 async function loadTariffs() {
     try {
-        const r = await fetch(API + '/settings', { headers: headers() });
+        const r = await fetch(API + '/settings', { headers: headers(), cache: 'no-store' });
         if (r.status === 401) { logout(); return; }
         const s = await r.json();
-        document.getElementById('minPrice').value = s.min_price;
-        document.getElementById('pricePerKm').value = s.price_per_km;
-        document.getElementById('commissionRate').value = s.commission_rate;
-        document.getElementById('surgeMult').value = s.surge_multiplier;
-        document.getElementById('surgeActive').checked = s.is_surge_active;
-        // Yangi bonus/keshbek maydonlari, undefined/null bo'lsa 0 qilib ko'rsatamiz
-        const cb = (typeof s.cashback_percent === 'number' && isFinite(s.cashback_percent)) ? s.cashback_percent : 0;
-        const maxB = (typeof s.max_bonus_usage_percent === 'number' && isFinite(s.max_bonus_usage_percent)) ? s.max_bonus_usage_percent : 0;
-        const cbInput = document.getElementById('cashbackPercent');
-        const maxBInput = document.getElementById('maxBonusUsagePercent');
-        if (cbInput) cbInput.value = cb;
-        if (maxBInput) maxBInput.value = maxB;
+        applyTariffsToForm(s);
+        tariffOriginal = snapshotTariffsFromServer(s);
     } catch (e) { showMsg('mainMsg', 'Tariflar yuklanmadi: ' + e.message, true); }
 }
 
 async function saveTariffs() {
     try {
-        const body = {
-            min_price: parseFloat(document.getElementById('minPrice').value),
-            price_per_km: parseFloat(document.getElementById('pricePerKm').value),
-            commission_rate: parseFloat(document.getElementById('commissionRate').value),
-            surge_multiplier: parseFloat(document.getElementById('surgeMult').value),
-            is_surge_active: document.getElementById('surgeActive').checked
-        };
-        const cbRaw = parseFloat(document.getElementById('cashbackPercent').value);
-        const maxBRaw = parseFloat(document.getElementById('maxBonusUsagePercent').value);
-        body.cashback_percent = Number.isFinite(cbRaw) ? cbRaw : 0;
-        body.max_bonus_usage_percent = Number.isFinite(maxBRaw) ? maxBRaw : 0;
+        const body = buildTariffsDiffPayload();
+        if (Object.keys(body).length === 0) {
+            showMsg('mainMsg', 'O\'zgarish yo\'q', false);
+            return;
+        }
 
         const r = await fetch(API + '/settings', {
             method: 'PUT',
             headers: headers(),
-            body: JSON.stringify(body)
+            body: JSON.stringify(body),
+            cache: 'no-store'
         });
         if (r.status === 401) { logout(); return; }
         if (!r.ok) {
@@ -422,8 +475,10 @@ async function saveTariffs() {
             showMsg('mainMsg', errMsg, true);
             return;
         }
+        const saved = await r.json();
+        applyTariffsToForm(saved);
+        tariffOriginal = snapshotTariffsFromServer(saved);
         showMsg('mainMsg', 'Saqlandi!', false);
-        await loadTariffs();
     } catch (e) { showMsg('mainMsg', 'Xato: ' + e.message, true); }
 }
 

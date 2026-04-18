@@ -481,12 +481,14 @@ async def admin_get_settings(
 
 @admin_router.put("/settings", response_model=SettingsResponse)
 async def admin_update_settings(
+    request: Request,
     body: SettingsUpdateRequest,
     db: AsyncSession = Depends(get_db),
     admin: User = Depends(get_current_admin),
 ):
     try:
         from app.services.settings_service import update_settings
+
         s = await update_settings(
             db,
             min_price=body.min_price,
@@ -499,6 +501,10 @@ async def admin_update_settings(
             max_bonus_cap=body.max_bonus_cap,
             price_per_min_waiting=body.price_per_min_waiting,
             admin_user_id=admin.id,
+            log_context={
+                "route": "admin_update_settings",
+                "client_ip": client_ip_from_request(request),
+            },
         )
         return SettingsResponse(**s.to_dict())
     except Exception as e:
