@@ -1,4 +1,5 @@
 """JWT token yaratish va tekshirish."""
+import hashlib
 from datetime import datetime, timedelta
 from typing import Optional
 
@@ -10,12 +11,22 @@ from app.core.config import settings
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
 
+def _bcrypt_safe(password: str) -> str:
+    return hashlib.sha256(password.encode("utf-8")).hexdigest()
+
+
 def verify_password(plain_password: str, hashed_password: str) -> bool:
-    return pwd_context.verify(plain_password, hashed_password)
+    # New method
+    safe = _bcrypt_safe(plain_password)
+    if pwd_context.verify(safe, hashed_password):
+        return True
+
+    # Old users fallback
+    return pwd_context.verify(plain_password[:72], hashed_password)
 
 
 def get_password_hash(password: str) -> str:
-    return pwd_context.hash(password)
+    return pwd_context.hash(_bcrypt_safe(password))
 
 
 def create_access_token(data: dict, expires_delta: Optional[timedelta] = None) -> str:
