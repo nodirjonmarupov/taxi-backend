@@ -270,8 +270,8 @@ async def update_settings(
     if redis:
         try:
             redis.delete(REDIS_SETTINGS_KEY)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.error("Redis settings cache delete failed: %s", e, exc_info=True)
 
     new_values = {**current.to_dict(), **updates}
 
@@ -280,39 +280,61 @@ async def update_settings(
         ts,
         json.dumps(new_values, default=str),
     )
-    await db.execute(
-        text(
+    try:
+        await db.execute(
+            text(
+                """
+                INSERT INTO settings (
+                    id, min_price, price_per_km, commission_rate, surge_multiplier, is_surge_active,
+                    cashback_percent, max_bonus_usage_percent, max_bonus_cap, price_per_min_waiting
+                )
+                VALUES (
+                    1, :min_price, :price_per_km, :commission_rate, :surge_multiplier, :is_surge_active,
+                    :cashback_percent, :max_bonus_usage_percent, :max_bonus_cap, :price_per_min_waiting
+                )
+                ON CONFLICT (id) DO UPDATE SET
+                    min_price = EXCLUDED.min_price,
+                    price_per_km = EXCLUDED.price_per_km,
+                    commission_rate = EXCLUDED.commission_rate,
+                    surge_multiplier = EXCLUDED.surge_multiplier,
+                    is_surge_active = EXCLUDED.is_surge_active,
+                    cashback_percent = EXCLUDED.cashback_percent,
+                    max_bonus_usage_percent = EXCLUDED.max_bonus_usage_percent,
+                    max_bonus_cap = EXCLUDED.max_bonus_cap,
+                    price_per_min_waiting = EXCLUDED.price_per_min_waiting,
+                    updated_at = CURRENT_TIMESTAMP
             """
-            INSERT INTO settings (
-                id, min_price, price_per_km, commission_rate, surge_multiplier, is_surge_active,
-                cashback_percent, max_bonus_usage_percent, max_bonus_cap, price_per_min_waiting
-            )
-            VALUES (
-                1, :min_price, :price_per_km, :commission_rate, :surge_multiplier, :is_surge_active,
-                :cashback_percent, :max_bonus_usage_percent, :max_bonus_cap, :price_per_min_waiting
-            )
-            ON CONFLICT (id) DO UPDATE SET
-                min_price = EXCLUDED.min_price,
-                price_per_km = EXCLUDED.price_per_km,
-                commission_rate = EXCLUDED.commission_rate,
-                surge_multiplier = EXCLUDED.surge_multiplier,
-                is_surge_active = EXCLUDED.is_surge_active,
-                cashback_percent = EXCLUDED.cashback_percent,
-                max_bonus_usage_percent = EXCLUDED.max_bonus_usage_percent,
-                max_bonus_cap = EXCLUDED.max_bonus_cap,
-                price_per_min_waiting = EXCLUDED.price_per_min_waiting,
-                updated_at = CURRENT_TIMESTAMP
-        """
-        ),
-        new_values,
+            ),
+            new_values,
+        )
+        await db.commit()
+    except Exception as e:
+        await db.rollback()
+        logger.error("[SETTINGS_ERROR] upsert/commit failed: %s", e, exc_info=True)
+        raise
+
+    row_result = await db.execute(
+        text(
+            "SELECT min_price, price_per_km, commission_rate, surge_multiplier, is_surge_active, "
+            "cashback_percent, max_bonus_usage_percent, max_bonus_cap, "
+            "COALESCE(price_per_min_waiting, 500) FROM settings WHERE id = 1"
+        )
+    )
+    r = row_result.fetchone()
+    if not r:
+        logger.error("[SETTINGS_ERROR] settings row id=1 missing after commit")
+        raise SettingsLoadError("settings id=1 missing after update")
+    saved_tariff = _tariff_from_row(r)
+    logger.info(
+        "[SETTINGS_SAVED] id=1 values_saved=%s",
+        json.dumps(saved_tariff.to_dict(), default=str),
     )
 
-    redis = get_redis()
     if redis is not None:
         try:
-            redis.set(REDIS_SETTINGS_KEY, json.dumps(new_values), ex=SETTINGS_REDIS_TTL_SEC)
+            redis.set(REDIS_SETTINGS_KEY, json.dumps(saved_tariff.to_dict()), ex=SETTINGS_REDIS_TTL_SEC)
         except Exception as e:
-            logger.warning("Redis settings yangilanmadi: %s", e)
+            logger.error("Redis settings cache write failed: %s", e, exc_info=True)
 
     if admin_user_id is not None:
         try:
@@ -323,11 +345,13 @@ async def update_settings(
                 ),
                 {"uid": admin_user_id, "details": json.dumps(updates)},
             )
+            await db.commit()
         except Exception as e:
-            logger.warning("Admin log yozilmadi: %s", e)
+            await db.rollback()
+            logger.error("[SETTINGS_ERROR] admin_logs insert failed: %s", e, exc_info=True)
+            raise
 
-    await db.commit()
-    return _tariff_from_flat_dict(new_values)
+    return saved_tariff
 
 
 def calculate_price(
