@@ -27,6 +27,7 @@ from app.core.logger import get_logger
 
 logger = get_logger(__name__)
 
+
 # ============================================
 # PROFESSIONAL TAXIMETER HTML
 # (moved to app/templates/index.html + app/static/main.js)
@@ -417,6 +418,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator:
             await session.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS is_blocked BOOLEAN DEFAULT FALSE;"))
             await session.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS is_admin BOOLEAN DEFAULT FALSE;"))
             await session.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS bonus_balance NUMERIC(10,2) DEFAULT 0;"))
+            await session.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS hashed_password VARCHAR(255);"))
             # ADMIN_IDS dagi telegram_id larni admin qilish
             for aid in getattr(settings, "ADMIN_IDS", []) or []:
                 try:

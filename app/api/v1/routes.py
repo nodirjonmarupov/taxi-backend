@@ -5,7 +5,7 @@ Faqat mavjud bo'lgan Order, User va Driver modellaridan foydalanadi.
 import json
 import logging
 import secrets
-from typing import List, Optional, Union
+from typing import List, Optional
 from datetime import datetime
 from fastapi import APIRouter, Depends, HTTPException, status, Query, Request
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -14,7 +14,7 @@ from pydantic import BaseModel, Field, field_validator
 
 from app.core.database import get_db
 from app.core.config import settings as config
-from app.core.security import create_access_token
+from app.core.security import create_access_token, verify_password
 from app.core.admin_login_rate_limit import (
     clear_admin_login_failures,
     client_ip_from_request,
@@ -144,31 +144,12 @@ async def complete_trip(
 
 # ==================== ADMIN ENDPOINTS ====================
 class AdminLoginRequest(BaseModel):
-    telegram_id: Optional[Union[int, str]] = None
+    username: str = Field(..., min_length=1, description="Panel admin username (create_admin script)")
     password: str = Field(..., min_length=1)
     admin_token: Optional[str] = Field(
         default=None,
-        description="ADMIN_LOGIN_TOKEN (second secret); omit to use password-only login",
+        description="ADMIN_LOGIN_TOKEN (second secret); omit if not configured",
     )
-
-    @field_validator("telegram_id", mode="before")
-    @classmethod
-    def normalize_telegram_id(cls, v):
-        if v is None:
-            return None
-        if isinstance(v, bool):
-            raise ValueError("telegram_id must be int or str, not bool")
-        if isinstance(v, int):
-            return v
-        if isinstance(v, str):
-            s = v.strip()
-            if not s:
-                return None
-            try:
-                return int(s)
-            except ValueError:
-                raise ValueError("telegram_id must be a valid integer")
-        raise ValueError("telegram_id must be int or str")
 
 
 class AdminLoginResponse(BaseModel):
@@ -182,17 +163,25 @@ async def admin_login(
     body: AdminLoginRequest,
     db: AsyncSession = Depends(get_db),
 ):
-    """Admin login: ADMIN_PASSWORD; optional ADMIN_LOGIN_TOKEN. Rate-limited per client IP."""
+    """Admin login: username + password (bcrypt); optional ADMIN_LOGIN_TOKEN. Rate-limited per client IP."""
     ip = client_ip_from_request(request)
     if is_admin_login_locked(ip):
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
             detail=lockout_message(),
         )
-    pw_ok = secrets.compare_digest(
-        body.password.encode("utf-8"),
-        config.ADMIN_PASSWORD.encode("utf-8"),
+
+    has_panel_admin = await db.execute(
+        select(func.count())
+        .select_from(User)
+        .where(User.is_admin == True, User.hashed_password.isnot(None))
     )
+    if (has_panel_admin.scalar() or 0) == 0:
+        raise HTTPException(
+            status_code=503,
+            detail="No admin user. Run: python -m app.scripts.create_admin",
+        )
+
     raw_tok = body.admin_token
     if raw_tok is None or (isinstance(raw_tok, str) and not raw_tok.strip()):
         tok_ok = True
@@ -201,20 +190,29 @@ async def admin_login(
             raw_tok.strip().encode("utf-8"),
             config.ADMIN_LOGIN_TOKEN.encode("utf-8"),
         )
-    if not (pw_ok and tok_ok):
+    if not tok_ok:
         record_admin_login_failure(ip)
         raise HTTPException(status_code=401, detail="Invalid credentials")
-    clear_admin_login_failures(ip)
 
+    uname = body.username.strip()
     result = await db.execute(
-        select(User).where(User.is_admin == True).order_by(User.id.asc()).limit(1)
+        select(User).where(
+            User.username == uname,
+            User.is_admin == True,
+            User.hashed_password.isnot(None),
+        )
     )
     user = result.scalar_one_or_none()
-    if not user:
-        raise HTTPException(
-            status_code=503,
-            detail="No admin user in database. Set is_admin=true for at least one user.",
-        )
+    if not user or not user.hashed_password:
+        record_admin_login_failure(ip)
+        raise HTTPException(status_code=401, detail="Invalid credentials")
+
+    if not verify_password(body.password, user.hashed_password):
+        record_admin_login_failure(ip)
+        raise HTTPException(status_code=401, detail="Invalid credentials")
+
+    clear_admin_login_failures(ip)
+
     if not getattr(user, "is_active", True):
         raise HTTPException(status_code=403, detail="User is inactive")
     if getattr(user, "is_blocked", False):

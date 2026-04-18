@@ -73,14 +73,18 @@
 <div id="loginScreen" class="login-wrap">
     <div class="login-card">
         <h1>Admin Panel</h1>
-        <p style="color:#94a3b8;font-size:0.9rem;margin-bottom:20px">Parol va admin token (.env: ADMIN_PASSWORD va ADMIN_LOGIN_TOKEN)</p>
+        <p style="color:#94a3b8;font-size:0.9rem;margin-bottom:20px">Username va parol (<code>python -m app.scripts.create_admin</code>). Admin token ixtiyoriy (.env: ADMIN_LOGIN_TOKEN).</p>
         <div class="form-group">
-            <label>Parol</label>
-            <input type="password" id="loginPassword" placeholder="ADMIN_PASSWORD" autocomplete="current-password">
+            <label>Username</label>
+            <input type="text" id="loginUsername" placeholder="create_admin da bergan username" autocomplete="username">
         </div>
         <div class="form-group">
-            <label>Admin token (yashirin kalit)</label>
-            <input type="password" id="loginAdminToken" placeholder="ADMIN_LOGIN_TOKEN" autocomplete="off">
+            <label>Parol</label>
+            <input type="password" id="loginPassword" placeholder="Parol" autocomplete="current-password">
+        </div>
+        <div class="form-group">
+            <label>Admin token (ixtiyoriy)</label>
+            <input type="password" id="loginAdminToken" placeholder="ADMIN_LOGIN_TOKEN — bo'sh qoldirish mumkin" autocomplete="off">
         </div>
         <div id="loginMsg" class="msg hidden"></div>
         <button onclick="doLogin()" style="width:100%;margin-top:8px">Kirish</button>
@@ -213,7 +217,7 @@
 </div>
 
 <script>
-const API = '/api/v1/admin';
+const API = window.location.origin + '/api/v1/admin';
 let token = localStorage.getItem('admin_token');
 
 function headers() {
@@ -241,24 +245,36 @@ async function parseErrorResponse(r) {
     }
 }
 
+function loginErrorMessage(status, detailStr) {
+    if (status === 401) return 'Noto\'g\'ri username, parol yoki admin token';
+    if (status === 403) return detailStr || 'Kirish rad etildi (akkaunt bloklangan yoki nofaol)';
+    if (status === 429) return 'Juda ko\'p urinish. Birozdan keyin qayta urinib ko\'ring.';
+    if (status === 503) return detailStr || 'Admin yo\'q. Terminalda: python -m app.scripts.create_admin';
+    return detailStr || 'Kirish rad etildi (' + status + ')';
+}
+
 async function doLogin() {
-    const pass = document.getElementById('loginPassword').value;
-    const admTok = document.getElementById('loginAdminToken').value;
-    if (!pass || !admTok) { showMsg('loginMsg', 'Parol va admin token kiriting', true); return; }
+    const username = (document.getElementById('loginUsername').value || '').trim();
+    const pass = (document.getElementById('loginPassword').value || '').trim();
+    const admTokRaw = document.getElementById('loginAdminToken').value || '';
+    const admTok = admTokRaw.trim();
+    if (!username) { showMsg('loginMsg', 'Username kiriting', true); return; }
+    if (!pass) { showMsg('loginMsg', 'Parolni kiriting', true); return; }
+    var body = { username: username, password: pass, admin_token: admTok.length ? admTok : null };
     try {
         const r = await fetch(API + '/login', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ password: pass, admin_token: admTok })
+            body: JSON.stringify(body)
         });
         let j = {};
         try { j = await r.json(); } catch (_) { j = {}; }
         if (!r.ok) {
-            var msg = '';
+            var detailStr = '';
             if (j.detail) {
-                msg = Array.isArray(j.detail) ? j.detail.map(function (x) { return x.msg || x; }).join(', ') : String(j.detail);
+                detailStr = Array.isArray(j.detail) ? j.detail.map(function (x) { return x.msg || x; }).join(', ') : String(j.detail);
             }
-            showMsg('loginMsg', msg || (r.status === 429 ? 'Juda ko\'p urinish. 10 daqiqadan keyin qayta urinib ko\'ring.' : 'Kirish rad etildi'), true);
+            showMsg('loginMsg', loginErrorMessage(r.status, detailStr), true);
             return;
         }
         if (!j.access_token) { showMsg('loginMsg', 'Javobda token yo\'q', true); return; }
