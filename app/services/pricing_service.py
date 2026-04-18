@@ -4,7 +4,7 @@ OSRM yo'l masofasi + zaxira (Haversine * shahar koeffitsiyenti) + tarif + 100 so
 """
 from __future__ import annotations
 
-import math
+from decimal import Decimal
 from typing import Optional, Tuple
 
 import httpx
@@ -13,6 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.logger import get_logger
 from app.services.settings_service import TariffSettings, get_settings
 from app.utils.distance import haversine_distance
+from app.utils.money_rounding import round_to_100_half_up
 
 logger = get_logger(__name__)
 
@@ -70,24 +71,19 @@ class PricingService:
         return h * CITY_DETOUR_COEFFICIENT
 
     @staticmethod
-    def round_price_to_100_soum(price: float) -> int:
-        """Yuqoriga 100 so'm qadam bilan yaxlitlash."""
-        return int(math.ceil(max(0.0, float(price)) / 100.0) * 100)
-
-    @staticmethod
     def apply_tariff_and_round_to_100(
         distance_km: float,
         tariff: TariffSettings,
     ) -> float:
         """
-        min_price + km * price_per_km, surge, min_price past bo'lmasin,
-        keyin 100 so'mga yaxlitlash.
+        max(min_price, km * price_per_km) — surge faqat masofa qismiga,
+        keyin 100 so'm HALF_UP (taximeter yakunida kutish alohida).
         """
-        raw = float(tariff.min_price) + (float(distance_km) * float(tariff.price_per_km))
+        km_part = float(distance_km) * float(tariff.price_per_km)
         if tariff.is_surge_active and tariff.surge_multiplier and tariff.surge_multiplier > 0:
-            raw *= float(tariff.surge_multiplier)
-        raw = max(raw, float(tariff.min_price))
-        return float(PricingService.round_price_to_100_soum(raw))
+            km_part *= float(tariff.surge_multiplier)
+        raw = max(float(tariff.min_price), km_part)
+        return float(round_to_100_half_up(Decimal(str(raw))))
 
     @staticmethod
     async def estimate_trip_price(
@@ -118,4 +114,8 @@ class PricingService:
             logger.info(f"Narx: OSRM masofa = {dist:.4f} km")
 
         price = PricingService.apply_tariff_and_round_to_100(dist, tariff)
+        logger.info(
+            f"[PRICE CALCULATED] estimate dist_km={dist:.4f} rounded_price={price} "
+            f"(min_price={tariff.min_price} price_per_km={tariff.price_per_km})"
+        )
         return dist, price

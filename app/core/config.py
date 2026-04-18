@@ -3,7 +3,7 @@ Core configuration module for the Taxi Backend System.
 Handles all environment variables and application settings.
 """
 from typing import Optional, List
-from pydantic_settings import BaseSettings
+from pydantic_settings import BaseSettings, SettingsConfigDict
 from pydantic import Field, field_validator
 
 _DEFAULT_SECRET_KEY = "dev_secret_key_987654321"
@@ -13,7 +13,13 @@ _DEFAULT_ADMIN_LOGIN_TOKEN = "default_token_123"
 
 class Settings(BaseSettings):
     """Application settings loaded from environment variables."""
-    
+
+    model_config = SettingsConfigDict(
+        extra="ignore",
+        env_file=".env",
+        case_sensitive=True,
+    )
+
     # Application
     APP_NAME: str = "TaxiBackend"
     PROJECT_NAME: str = "Timgo Taxi"
@@ -97,11 +103,7 @@ class Settings(BaseSettings):
     ALGORITHM: str = "HS256"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 30
     
-    # Business Logic
-    BASE_PRICE: float = 50.0   # Base fare
-    PRICE_PER_KM: float = 15.0   # Price per kilometer
-    COMMISSION_PERCENT: float = 10.0   # Platform commission (%)
-    COMMISSION_PERCENTAGE: float = 10.0   # Eski .env uchun (COMMISSION_PERCENT bilan bir xil)
+    # Business Logic (narxlarni faqat DB settings id=1 dan oling)
     FIXED_COMMISSION: float = 0.0   # Fiksirlangan komissiya (0 bo'lsa foiz ishlatiladi)
     MIN_BALANCE: float = 5000.0   # Haydovchi uchun minimal balans (so'm)
     ORDER_TIMEOUT_SECONDS: int = 300   # 5 minutes to find a driver
@@ -118,10 +120,6 @@ class Settings(BaseSettings):
     # WebApp / Ngrok (Telegram bot uchun)
     WEBAPP_BASE_URL: str = Field(default="https://candid-semiexposed-dung.ngrok-free.dev")
     WORKERS: int = 4
-    
-    class Config:
-        env_file = ".env"
-        case_sensitive = True
 
 
 # Global settings instance

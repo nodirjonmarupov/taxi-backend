@@ -15,7 +15,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 
 from app.core.database import AsyncSessionLocal
-from app.core.redis import get_redis
+from app.core.redis import get_redis, get_trip_state, delete_trip_state
 from app.crud.user import UserCRUD, DriverCRUD
 from app.models.user import UserRole
 from app.models.order import Order, OrderStatus
@@ -1252,50 +1252,121 @@ async def link_card_verify(message: Message, state: FSMContext, lang: str = "uz"
 
 @driver_router.callback_query(F.data.startswith("finish_order:"))
 async def finish_order(callback: CallbackQuery):
-    """Safarni yakunlash va xabarlarni to'g'ri taqsimlash"""
+    """Safarni yakunlash — yakuniy narx har doim serverda qayta hisoblanadi (WebApp bilan bir xil)."""
     try:
         order_id = int(callback.data.split(":")[1])
         
         async with AsyncSessionLocal() as db:
             from app.crud.order_crud import OrderCRUD
+            from app.services.trip_billing import compute_server_final_price_for_completion
+            from app.services.settings_service import SettingsLoadError
+
             order = await OrderCRUD.get_by_id(db, order_id)
-            
+
             fin_lang = await db_lang_for_telegram(db, callback.from_user.id)
-            if not order or order.status == OrderStatus.COMPLETED:
+            if not order:
                 await callback.answer(get_text(fin_lang, "driver_finish_order_closed"))
                 return
 
-            # 1. Yakuniy narx faqat taksometr (WebApp) tomonidan oldindan yozilishi kerak.
-            # Server qayta hisoblamaydi; final_price bo'lmasa — faqat WebApp orqali yakunlash.
-            fp = float(getattr(order, "final_price", None) or 0)
-            if fp <= 0:
+            actor_user = await UserCRUD.get_by_telegram_id(db, callback.from_user.id)
+            actor_driver = (
+                await DriverCRUD.get_by_user_id(db, actor_user.id) if actor_user else None
+            )
+            if not actor_driver:
+                logger.warning(
+                    "finish_order: no driver profile telegram_id=%s order_id=%s",
+                    callback.from_user.id,
+                    order_id,
+                )
                 await callback.answer(
-                    get_text(fin_lang, "driver_finish_need_taximeter"),
+                    get_text(fin_lang, "driver_finish_not_driver"),
+                    show_alert=True,
+                )
+                return
+            if order.driver_id != actor_driver.id:
+                logger.warning(
+                    "finish_order: driver mismatch order_id=%s order_driver=%s actor_driver=%s tg=%s",
+                    order_id,
+                    order.driver_id,
+                    actor_driver.id,
+                    callback.from_user.id,
+                )
+                await callback.answer(
+                    get_text(fin_lang, "driver_finish_not_your_order"),
                     show_alert=True,
                 )
                 return
 
-            order.status = OrderStatus.COMPLETED
-            now = datetime.now()
-            order.finished_at = now
-            order.completed_at = now  # Admin panel daily_stats uchun kerak
-            order.final_price = fp
-            dist_km = float(getattr(order, "distance_km", None) or 0)
+            if order.status == OrderStatus.COMPLETED:
+                await callback.answer(get_text(fin_lang, "driver_finish_order_closed"))
+                return
+
+            if order.status != OrderStatus.IN_PROGRESS:
+                await callback.answer(
+                    get_text(fin_lang, "driver_finish_wrong_status"),
+                    show_alert=True,
+                )
+                return
+
+            r = get_redis()
+            trip_st = get_trip_state(r, order_id) if r else None
+
+            try:
+                fp, tariff_snap, d_km = await compute_server_final_price_for_completion(
+                    db, order_id, order, trip_st=trip_st
+                )
+            except SettingsLoadError as e:
+                logger.error("finish_order SettingsLoadError: %s", e)
+                await callback.answer(
+                    get_text(fin_lang, "driver_finish_billing_failed"),
+                    show_alert=True,
+                )
+                return
+            except Exception as e:
+                logger.exception("finish_order compute_server_final_price: %s", e)
+                await callback.answer(
+                    get_text(fin_lang, "driver_finish_billing_failed"),
+                    show_alert=True,
+                )
+                return
+
             logger.info(
-                f"Order {order_id} status changed to completed (bot callback), "
-                f"distance_km={dist_km}, final_price={fp}"
+                "[SERVER RECOMPUTE] order_id=%s final_price=%s distance_km=%s",
+                order_id,
+                fp,
+                d_km,
             )
 
-            # Haydovchini yana bo'sh (available) qilish (explicit async - no order.driver lazy load)
-            driver = None
-            if order.driver_id:
-                driver = await DriverCRUD.get_by_id(db, order.driver_id)
+            updated_order = await OrderCRUD.update_status(
+                db,
+                order_id,
+                OrderStatus.COMPLETED,
+                distance_km=d_km,
+                final_price=fp,
+                tariff_snapshot_json=tariff_snap,
+            )
+            if not updated_order:
+                await callback.answer(
+                    get_text(fin_lang, "driver_finish_billing_failed"),
+                    show_alert=True,
+                )
+                return
+
+            if r is not None:
+                try:
+                    delete_trip_state(r, order_id)
+                except Exception as del_e:
+                    logger.warning("delete_trip_state order=%s: %s", order_id, del_e)
+
+            if updated_order.driver_id:
+                driver = await DriverCRUD.get_by_id(db, updated_order.driver_id)
                 if driver:
                     driver.is_available = True
+                    await db.commit()
 
-            await db.commit()
+            order = updated_order
 
-            # 2. Komissiyani haydovchi balansidan ayirish (o'z sessiyasida)
+            # Komissiya / keshbek (o'z sessiyasida)
             from app.services.commission import deduct_commission_on_trip_complete
             bonus_info = await deduct_commission_on_trip_complete(order)
             used_bonus     = int(bonus_info.get("used_bonus", 0))
@@ -1306,6 +1377,10 @@ async def finish_order(callback: CallbackQuery):
             # 3. HAYDOVCHIGA XABAR — minimalist format
             def _fmt(n: int) -> str:
                 return f"{n:,}".replace(",", " ")
+
+            payable_str = _fmt(payable_amount)
+            used_str = _fmt(used_bonus)
+            earned_str = _fmt(earned_cashback)
 
             final_price_int = int(fp)
             if used_bonus > 0:
@@ -1392,7 +1467,7 @@ async def finish_order(callback: CallbackQuery):
             except Exception as e:
                 logger.error(f"Mijozga yakuniy xabar yuborishda xato: {e}")
 
-            await callback.answer(_get_text(driver_lang, "trip_completed_check"))
+            await callback.answer(get_text(fin_lang, "trip_completed_check"))
 
     except Exception as e:
         logger.error(f"❌ Safarni yakunlashda xato: {e}")

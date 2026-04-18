@@ -9,7 +9,7 @@ from __future__ import annotations
 from copy import deepcopy
 from datetime import datetime
 from math import ceil
-from decimal import Decimal, ROUND_HALF_UP
+from decimal import Decimal
 from typing import Any, Dict, Optional, Union
 
 from sqlalchemy import select, update
@@ -18,6 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.logger import get_logger
 from app.models.order import Order, OrderStatus
 from app.utils.distance import haversine_distance
+from app.utils.money_rounding import round_to_100_half_up
 
 # GPS shovqinini kamaytirish (kesma qo'shmasdan last nuqtani yangilash)
 MIN_SEGMENT_M = 3.0
@@ -27,11 +28,6 @@ GPS_NOISE_MAX_M = 5.0
 MAX_SPEED_KMH = 160.0
 WAITING_SPEED_KMH = 5.0
 DEFAULT_ROUND_STEP_SOM = Decimal("100")
-PRICE_TOLERANCE = Decimal("0.02")
-
-# Tiered waiting-time fee (so'm), server-authoritative — not linear price_per_min_waiting.
-WAITING_FIRST_MIN = 1000
-WAITING_NEXT_MIN = 500
 
 # Time-based surge floor: 22:00–06:00 (server local time, naive datetime).
 TIME_SURGE_NIGHT_MIN = 1.2
@@ -72,31 +68,21 @@ def resolve_effective_surge_multiplier(settings: Any, at: Optional[datetime] = N
 
 
 def billing_fallback_tariff_no_stored_snapshot(
-    min_price: int, price_per_km: int, price_per_min_waiting: int,
+    min_price: float,
+    price_per_km: float,
+    price_per_min_waiting: float,
 ) -> Dict[str, Any]:
     """
     When Redis and DB have no frozen snapshot: use current line-item prices but surge=1.0 only
     (no live surge) so billing does not jump to admin night/manual surge.
     """
     return {
-        "base": int(min_price),
-        "km": int(price_per_km),
-        "wait": int(price_per_min_waiting),
+        "base": float(min_price),
+        "km": float(price_per_km),
+        "wait": float(price_per_min_waiting),
         "surge_multiplier": 1.0,
         "tariff_version": 1,
     }
-
-
-def compute_waiting_fee(waiting_seconds: Union[int, float]) -> int:
-    """
-    Tiered idle/waiting charge (so'm):
-      first billed minute → WAITING_FIRST_MIN, each additional full minute → WAITING_NEXT_MIN.
-    Uses ceil(waiting_seconds / 60) for minute blocks.
-    """
-    if not waiting_seconds or float(waiting_seconds) <= 0:
-        return 0
-    minutes = ceil(float(waiting_seconds) / 60.0)
-    return WAITING_FIRST_MIN + max(0, minutes - 1) * WAITING_NEXT_MIN
 
 
 def compute_fare(
@@ -107,54 +93,39 @@ def compute_fare(
 ) -> Decimal:
     """
     Billing (frozen tariff_snapshot per trip, Decimal math):
-      distance_charge = distance_km * km_price * surge_multiplier  # surge on km only
-      waiting_fee = tiered compute_waiting_fee(waiting_seconds)   # not surged
-      total = base + distance_charge + waiting_fee
-    Surge clamped [1,2] here. Then round to round_to (default 100 so'm).
+      total = max(min_price, distance_km * km_price * surge + waiting_minutes * price_per_min_waiting)
+    Surge clamped [1,2] here, faqat masofa qismiga. Keyin round_to (100 so'm).
     """
-    base = Decimal(str(tariff_snapshot.get("base", 0)))
+    min_price = Decimal(str(tariff_snapshot.get("base", 0)))
     km_p = Decimal(str(tariff_snapshot.get("km", 0)))
+    wait_p = Decimal(str(tariff_snapshot.get("wait", 0)))
     surge = Decimal(str(tariff_snapshot.get("surge_multiplier", 1)))
     surge = max(Decimal("1.0"), surge)
     surge = min(Decimal("2.0"), surge)
     d_km = Decimal(str(distance_km))
 
-    waiting_fee = Decimal(str(compute_waiting_fee(waiting_seconds)))
-    distance_part = d_km * km_p
-    surged_distance = distance_part * surge
-    total = base + surged_distance + waiting_fee
+    ws = float(waiting_seconds or 0)
+    wait_min = Decimal(str(int(ceil(ws / 60.0)) if ws > 0 else 0))
+    distance_part = d_km * km_p * surge
+    waiting_part = wait_min * wait_p
+    subtotal = distance_part + waiting_part
+    total = max(min_price, subtotal)
     if round_to <= 0:
         return total
-    q = (total / round_to).quantize(Decimal("1"), rounding=ROUND_HALF_UP) * round_to
-    return q
+    return Decimal(round_to_100_half_up(total))
 
 
 def verify_final_price(
     client_price: Union[Decimal, float, int, str],
     computed_price: Union[Decimal, float, int, str],
-    tolerance: Decimal = PRICE_TOLERANCE,
 ) -> bool:
-    """
-    Server computed_price is authoritative. client_price is compared within ±tolerance.
-    Returns True if within tolerance; logs warning if outside.
-    """
+    """Qat'iy: faqat to'liq mos kelganda True (tolerans yo'q)."""
     cp = Decimal(str(client_price))
     comp = Decimal(str(computed_price))
-    if comp == 0:
-        ok = cp == 0
-        if not ok:
-            _engine_log.warning(
-                f"Final price mismatch (computed=0): client={cp} computed={comp}",
-            )
-        return ok
-    diff_ratio = abs(cp - comp) / comp
-    if diff_ratio > tolerance:
-        _engine_log.warning(
-            "Final price mismatch exceeds "
-            f"{float(tolerance * 100):.2f}%: client={cp} computed={comp} ratio={diff_ratio}",
-        )
-        return False
-    return True
+    ok = cp == comp
+    if not ok:
+        _engine_log.warning(f"Final price mismatch (strict): client={cp} server={comp}")
+    return ok
 
 
 def _segment_speed_kmh(segment_km: float, delta_s: float) -> float:

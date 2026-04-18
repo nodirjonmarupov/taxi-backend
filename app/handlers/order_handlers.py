@@ -181,7 +181,8 @@ async def _create_and_distribute_order(
             )
             user_obj = user_locked.scalar_one_or_none()
 
-            wants_cashback = bool(getattr(user_obj, "use_cashback_next_order", False))
+            # Bonusni safarga qo'llash: foydalanuvchi avvalgi "keyingi safar" tugmasisiz ham (default).
+            wants_cashback = True
             frozen = Decimal("0")
 
             if wants_cashback and user_obj is not None:
@@ -191,8 +192,8 @@ async def _create_and_distribute_order(
                 #   3 900 → 3 000 | 4 600 → 4 000 | 8 000 → 8 000
                 rounded = (raw_balance // Decimal("1000")) * Decimal("1000")
 
-                # Qoida 2: absolyut cap (settings.max_bonus_cap, default 5 000 so'm)
-                cap = Decimal(str(getattr(tariff, "max_bonus_cap", 5000.0) or 5000.0))
+                # Qoida 2: absolyut cap (settings.max_bonus_cap)
+                cap = Decimal(str(tariff.max_bonus_cap))
 
                 # Qoida 3: safar narxidan oshmasin (to'lov manfiy bo'lmasin)
                 price_limit = Decimal(str(estimated_price or 0))
@@ -204,7 +205,8 @@ async def _create_and_distribute_order(
                 if frozen > 0:
                     # Balansdan ayirib, frozen_bonus'ga muzlatamiz
                     user_obj.bonus_balance = float(raw_balance - frozen)
-                    user_obj.use_cashback_next_order = False
+                    if bool(getattr(user_obj, "use_cashback_next_order", False)):
+                        user_obj.use_cashback_next_order = False
 
             new_order = Order(
                 user_id=user_id,

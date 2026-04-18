@@ -3,7 +3,7 @@ Komissiya hisoblash va haydovchi balansidan ayirish.
 Barcha pul hisob-kitoblari Decimal bilan amalga oshiriladi.
 Yakuniy DB/UI qiymatlari butun songa (100 so'mga) yaxlitlanadi.
 """
-from decimal import Decimal, ROUND_DOWN
+from decimal import Decimal
 from typing import Any
 
 from sqlalchemy import func, select
@@ -12,6 +12,7 @@ from app.core.config import settings as config
 from app.core.database import AsyncSessionLocal
 from app.core.logger import get_logger
 from app.services.settings_service import get_settings
+from app.utils.money_rounding import round_to_100_half_up
 from app.models.bonus import BonusTransaction
 from app.models.order import Order
 
@@ -20,10 +21,6 @@ logger = get_logger(__name__)
 FIXED_COMMISSION = Decimal(str(getattr(config, "FIXED_COMMISSION", 0.0)))
 MIN_BALANCE = Decimal(str(getattr(config, "MIN_BALANCE", 5000.0)))
 
-# Yaxlitlash birligi: yakuniy qiymatlar 100 so'mga yaxlitlanadi
-_ROUND_UNIT = Decimal("100")
-
-
 def _to_dec(val) -> Decimal:
     """Har qanday turdagi qiymatni Decimal ga o'girish."""
     if val is None:
@@ -31,16 +28,13 @@ def _to_dec(val) -> Decimal:
     return Decimal(str(val))
 
 
-def _round_to_100(val: Decimal) -> Decimal:
-    """Pastga 100 so'mga yaxlitlash (100 so'm ≈ eng kichik tiyin birligi)."""
-    return (val // _ROUND_UNIT) * _ROUND_UNIT
-
-
 def _calc_commission(fare: Decimal, commission_rate: Decimal) -> Decimal:
     """Komissiya = FIXED_COMMISSION (agar >0) yoki fare × rate/100."""
     if FIXED_COMMISSION > 0:
         return FIXED_COMMISSION
-    return _round_to_100(fare * commission_rate / Decimal("100"))
+    return Decimal(
+        round_to_100_half_up(fare * commission_rate / Decimal("100"))
+    )
 
 
 async def release_frozen_bonus(order_id: int) -> None:
@@ -98,7 +92,7 @@ async def deduct_commission_on_trip_complete(
           db.rollback() chaqirishi mumkin — bu bizning tranzaksiyamizni yopib qo'yadi.
     • O'rniga: await session.begin() → ... → await session.commit()
       va xatolikda finally ichida await session.rollback() + await session.close().
-    • get_settings(None) ishlatiladi — Redis → default, DB ga tegmaydi, rollback yo'q.
+    • get_settings() (ichki sessiya) — faqat DB id=1, keshbek foizi shu yerdan.
     • Telegram xabari commit VA session.close() dan KEYIN yuboriladi (committed flag orqali).
     """
     # ── 0. Primitive IDlarni sessiya ochilishidan OLDIN olamiz ──
@@ -116,8 +110,8 @@ async def deduct_commission_on_trip_complete(
         f"🔄 deduct_commission: order={order_id} driver={driver_id} — dedicated session"
     )
 
-    # ── 1. Settings — Redis → default. DB sessiyasiga tegmaydi ──
-    tariff           = await get_settings(None)
+    # ── 1. Settings — DB singleton (alohida sessiya, komissiya tranzaksiyasiga aralashmaydi) ──
+    tariff = await get_settings()
     cashback_percent = _to_dec(tariff.cashback_percent)
 
     # ── 2. Sessiya — manual boshqaruv ──
@@ -160,7 +154,7 @@ async def deduct_commission_on_trip_complete(
             prev_used     = _to_dec(used_r.scalar_one())
             prev_earned   = _to_dec(earn_r.scalar_one())
             fare_val      = (getattr(order_db, "final_price", None)
-                             or getattr(order_db, "estimated_price", None) or 50000)
+                             or getattr(order_db, "estimated_price", None) or 0)
             prev_payable  = max(_to_dec(fare_val) - prev_used, Decimal("0"))
             await session.rollback()   # hech narsa o'zgarmadi — toza yopish
             setattr(order, "used_bonus",    prev_used)
@@ -176,8 +170,17 @@ async def deduct_commission_on_trip_complete(
 
         # ── 5. Yakuniy narx ──
         fare_val = (getattr(order_db, "final_price", None)
-                    or getattr(order_db, "estimated_price", None) or 50000)
-        total_price_dec = _round_to_100(_to_dec(fare_val))
+                    or getattr(order_db, "estimated_price", None))
+        if fare_val is None:
+            logger.warning(
+                f"[PRICE CALCULATED] order={order_id} has no final_price/estimated_price — using 0"
+            )
+            fare_val = 0
+        total_price_dec = Decimal(round_to_100_half_up(_to_dec(fare_val)))
+        logger.info(
+            f"[PRICE CALCULATED] order={order_id} final_price_basis={int(total_price_dec)} "
+            f"cashback_percent={float(cashback_percent)}"
+        )
 
         # ── 6. Driver ──
         driver = await DriverCRUD.get_by_id(session, driver_id)
@@ -262,12 +265,16 @@ async def deduct_commission_on_trip_complete(
                 pass
 
         # ── 9. Payable amount ──
-        payable_amount = _round_to_100(max(total_price_dec - actual_used, Decimal("0")))
+        payable_amount = Decimal(
+            round_to_100_half_up(max(total_price_dec - actual_used, Decimal("0")))
+        )
 
-        # ── 10. Cashback EARN ──
-        if cashback_percent > 0 and payable_amount > 0:
-            earned_cashback = _round_to_100(
-                payable_amount * cashback_percent / Decimal("100")
+        # ── 10. Cashback EARN (sozlamalar: yakuniy narx foizi) ──
+        if cashback_percent > 0 and total_price_dec > 0:
+            earned_cashback = Decimal(
+                round_to_100_half_up(
+                    total_price_dec * cashback_percent / Decimal("100")
+                )
             )
         if user is not None and earned_cashback > 0:
             user.bonus_balance = float(_to_dec(user.bonus_balance) + earned_cashback)
@@ -275,6 +282,10 @@ async def deduct_commission_on_trip_complete(
                 user_id=user.id, order_id=order_id,
                 amount=earned_cashback, transaction_type="EARN",
             ))
+            logger.info(
+                f"[CASHBACK APPLIED] order={order_id} user_id={user.id} "
+                f"earned_cashback={int(earned_cashback)} basis_fare={int(total_price_dec)}"
+            )
 
         # ── 11. Caller order ob'ektiga qiymatlarni yozamiz ──
         setattr(order, "used_bonus",      actual_used)

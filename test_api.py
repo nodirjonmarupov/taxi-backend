@@ -6,6 +6,8 @@ Run with: python test_api.py
 import requests
 import json
 
+from app.core.security import create_access_token
+
 # Base URL
 BASE_URL = "http://localhost:8000/api/v1"
 
@@ -16,6 +18,11 @@ class TaxiAPITester:
     def __init__(self, base_url=BASE_URL):
         self.base_url = base_url
         self.session = requests.Session()
+
+    def set_driver_bearer_auth(self, driver_user_id: int):
+        """POST /trips/.../complete uchun JWT (sub = haydovchi user id)."""
+        token = create_access_token(data={"sub": str(driver_user_id)})
+        self.session.headers["Authorization"] = f"Bearer {token}"
     
     def print_response(self, response, title="Response"):
         """Pretty print API response."""
@@ -113,29 +120,29 @@ class TaxiAPITester:
         self.print_response(response, f"Get Order {order_id}")
         return response.json() if response.status_code == 200 else None
     
-    def accept_order(self, order_id, driver_id):
-        """Driver accepts an order."""
+    def accept_order(self, order_id):
+        """Driver accepts an order (Bearer: set_driver_bearer_auth)."""
         response = self.session.post(
-            f"{self.base_url}/orders/{order_id}/accept?driver_id={driver_id}"
+            f"{self.base_url}/orders/{order_id}/accept",
         )
         self.print_response(response, f"Accept Order {order_id}")
         return response.json() if response.status_code == 200 else None
     
     # ==================== TRIP ENDPOINTS ====================
     
-    def start_trip(self, order_id, driver_id):
-        """Start a trip."""
+    def start_trip(self, order_id):
+        """Start a trip (Bearer: set_driver_bearer_auth)."""
         response = self.session.post(
-            f"{self.base_url}/trips/{order_id}/start?driver_id={driver_id}"
+            f"{self.base_url}/trips/{order_id}/start",
         )
         self.print_response(response, "Start Trip")
         return response.json() if response.status_code == 200 else None
     
-    def complete_trip(self, order_id, driver_id, final_price, distance_km=0.0):
-        """Complete a trip (narx va masofa — taksometr/client qiymatlari)."""
+    def complete_trip(self, order_id):
+        """Complete a trip — yakuniy narx serverda hisoblanadi (Bearer: set_driver_bearer_auth)."""
         response = self.session.post(
-            f"{self.base_url}/trips/{order_id}/complete?driver_id={driver_id}",
-            json={"final_price": final_price, "distance_km": distance_km},
+            f"{self.base_url}/trips/{order_id}/complete",
+            json={},
         )
         self.print_response(response, f"Complete Trip {order_id}")
         return response.json() if response.status_code == 200 else None
@@ -245,27 +252,25 @@ def run_complete_flow():
     # 6. Check Order Status
     print("\n6️⃣  Checking Order Status...")
     api.get_order(order["id"])
+
+    # Haydovchi JWT — accept / start / complete uchun
+    api.set_driver_bearer_auth(driver_user["id"])
     
     # 7. Accept Order (if not auto-assigned)
     if order["status"] == "pending":
         print("\n7️⃣  Driver Accepting Order...")
-        api.accept_order(order["id"], driver["id"])
+        api.accept_order(order["id"])
     
     # 8. Start Trip
     print("\n8️⃣  Starting Trip...")
-    trip = api.start_trip(order["id"], driver["id"])
+    trip = api.start_trip(order["id"])
     if not trip:
         print("❌ Failed to start trip")
         return
     
     # 9. Complete Trip
     print("\n9️⃣  Completing Trip...")
-    completed_trip = api.complete_trip(
-        order_id=trip["id"],
-        driver_id=driver["id"],
-        final_price=12500.0,
-        distance_km=1.25,
-    )
+    completed_trip = api.complete_trip(order_id=trip["id"])
     if not completed_trip:
         print("❌ Failed to complete trip")
         return

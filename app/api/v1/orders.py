@@ -3,25 +3,29 @@ Orders API V2 - Real-time matching bilan
 Professional Taximeter Integration
 """
 import asyncio
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 from datetime import datetime
 
+from app.api.deps import get_current_driver
 from app.core.database import get_db
+from app.core.admin_login_rate_limit import client_ip_from_request
+from app.core.logger import get_logger
 from app.core.redis import get_redis
 from app.crud.order_crud import OrderCRUD
-from app.crud.user import DriverCRUD
+from app.crud.user import UserCRUD
+from app.models.user import Driver
 from app.schemas.order import OrderCreate, OrderResponse
 from app.services.geo_service import GeoService
 from app.services.order_matching import start_matching_background_task
 from app.services.telegram_notifications import TelegramNotificationService
 from app.services.pricing_service import PricingService
-from app.core.logger import get_logger
 from app.models.order import OrderStatus
 
 logger = get_logger(__name__)
 
 router = APIRouter(prefix="/orders", tags=["orders"])
+# Eslatma: asosiy API `app.api.v1.routes` orqali ulanadi; accept endpoint u yerda ham mavjud.
 
 @router.post("", response_model=OrderResponse)
 async def create_order_with_matching(
@@ -70,11 +74,12 @@ async def create_order_with_matching(
 @router.post("/{order_id}/accept")
 async def accept_order(
     order_id: int,
-    driver_id: int,
-    db: AsyncSession = Depends(get_db)
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    current_driver: Driver = Depends(get_current_driver),
 ):
     """
-    Haydovchi buyurtmani qabul qilishi.
+    Haydovchi buyurtmani qabul qiladi. JWT (Bearer) majburiy — faqat joriy haydovchi biriktiriladi.
     SELECT FOR UPDATE bilan race condition oldini olinadi.
     """
     order = await OrderCRUD.get_by_id_for_update(db, order_id)
@@ -83,12 +88,19 @@ async def accept_order(
         raise HTTPException(404, "Buyurtma topilmadi")
 
     if order.status != OrderStatus.PENDING:
-        raise HTTPException(400, "Buyurtma allaqachon qabul qilingan yoki bekor qilingan")
+        logger.warning(
+            "accept_order rejected: order_id=%s status=%s ip=%s driver_id=%s",
+            order_id,
+            order.status,
+            client_ip_from_request(request),
+            current_driver.id,
+        )
+        raise HTTPException(
+            400,
+            "Buyurtma allaqachon qabul qilingan yoki bekor qilingan",
+        )
 
-    driver = await DriverCRUD.get_by_id(db, driver_id)
-    if not driver:
-        raise HTTPException(404, "Haydovchi topilmadi")
-
+    driver_id = current_driver.id
     existing = await OrderCRUD.get_ongoing_order_for_driver(db, driver_id)
     if existing and existing.id != order_id:
         raise HTTPException(400, "Haydovchida allaqachon faol buyurtma bor")
@@ -96,22 +108,34 @@ async def accept_order(
     order.status = OrderStatus.ACCEPTED
     order.driver_id = driver_id
     await db.commit()
-    
-    # Mijozga Telegram orqali xabar yuborish
+
     from app.bot.telegram_bot_v2 import bot
+
     notification_service = TelegramNotificationService(bot)
-    
+    drv_user = await UserCRUD.get_by_id(db, current_driver.user_id)
+    driver_name = (
+        f"{drv_user.first_name} {drv_user.last_name or ''}".strip()
+        if drv_user
+        else "Haydovchi"
+    )
+    driver_phone = getattr(drv_user, "phone", None) or "Noma'lum" if drv_user else "Noma'lum"
+
     await notification_service.send_order_accepted_to_user(
         user_id=order.user_id,
         order_id=order.id,
-        driver_name=f"{driver.user.first_name} {driver.user.last_name or ''}",
-        driver_phone=driver.user.phone or "Noma'lum",
-        car_model=driver.car_model,
-        car_number=driver.car_number,
-        rating=driver.rating # Haydovchining joriy reytingini yuboramiz
+        driver_name=driver_name,
+        driver_phone=driver_phone,
+        car_model=current_driver.car_model,
+        car_number=current_driver.car_number,
+        rating=current_driver.rating,
     )
-    
-    logger.info(f"Order {order_id} haydovchi {driver_id} tomonidan qabul qilindi")
+
+    logger.info(
+        "accept_order: order_id=%s driver_id=%s ip=%s",
+        order_id,
+        driver_id,
+        client_ip_from_request(request),
+    )
     return {"status": "accepted", "order_id": order_id, "driver_id": driver_id}
 
 @router.get("/{order_id}", response_model=OrderResponse)

@@ -22,7 +22,7 @@ from app.core.admin_login_rate_limit import (
     lockout_message,
     record_admin_login_failure,
 )
-from app.api.deps import get_current_admin
+from app.api.deps import get_current_admin, get_current_driver
 from app.crud.user import UserCRUD, DriverCRUD, RatingCRUD
 from app.crud.order_crud import OrderCRUD
 from app.schemas.user import (
@@ -39,6 +39,9 @@ from app.services.matching import DriverMatchingService
 from app.services.trip import TripService
 from app.models.order import Order, OrderStatus
 from app.models.user import User, Driver
+from app.core.logger import get_logger
+
+logger = get_logger(__name__)
 
 # Routerlarni yaratish
 user_router = APIRouter(prefix="/users", tags=["users"])
@@ -110,37 +113,113 @@ async def get_order(order_id: int, db: AsyncSession = Depends(get_db)):
         raise HTTPException(404, "Buyurtma topilmadi")
     return order
 
+
+@order_router.post("/{order_id}/accept")
+async def accept_order(
+    order_id: int,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    current_driver: Driver = Depends(get_current_driver),
+):
+    """
+    Haydovchi buyurtmani qabul qiladi. JWT (Bearer) majburiy — faqat joriy haydovchi biriktiriladi.
+    """
+    order = await OrderCRUD.get_by_id_for_update(db, order_id)
+
+    if not order:
+        raise HTTPException(404, "Buyurtma topilmadi")
+
+    if order.status != OrderStatus.PENDING:
+        logger.warning(
+            "accept_order rejected: order_id=%s status=%s ip=%s driver_id=%s",
+            order_id,
+            order.status,
+            client_ip_from_request(request),
+            current_driver.id,
+        )
+        raise HTTPException(
+            400,
+            "Buyurtma allaqachon qabul qilingan yoki bekor qilingan",
+        )
+
+    driver_id = current_driver.id
+    existing = await OrderCRUD.get_ongoing_order_for_driver(db, driver_id)
+    if existing and existing.id != order_id:
+        raise HTTPException(400, "Haydovchida allaqachon faol buyurtma bor")
+
+    order.status = OrderStatus.ACCEPTED
+    order.driver_id = driver_id
+    await db.commit()
+
+    from app.bot.telegram_bot_v2 import bot
+    from app.services.telegram_notifications import TelegramNotificationService
+
+    notification_service = TelegramNotificationService(bot)
+    drv_user = await UserCRUD.get_by_id(db, current_driver.user_id)
+    driver_name = (
+        f"{drv_user.first_name} {drv_user.last_name or ''}".strip()
+        if drv_user
+        else "Haydovchi"
+    )
+    driver_phone = getattr(drv_user, "phone", None) or "Noma'lum" if drv_user else "Noma'lum"
+
+    await notification_service.send_order_accepted_to_user(
+        user_id=order.user_id,
+        order_id=order.id,
+        driver_name=driver_name,
+        driver_phone=driver_phone,
+        car_model=current_driver.car_model,
+        car_number=current_driver.car_number,
+        rating=current_driver.rating,
+    )
+
+    logger.info(
+        "accept_order: order_id=%s driver_id=%s ip=%s",
+        order_id,
+        driver_id,
+        client_ip_from_request(request),
+    )
+    return {"status": "accepted", "order_id": order_id, "driver_id": driver_id}
+
+
 # ==================== TRIP (SAFAR) LOGIKASI ====================
 # Bu yerda nomlar Trip deb qolsa ham, ichida Order modelidan foydalanadi
 
 
-class TripCompleteBody(BaseModel):
-    """Yakuniy narx va masofa — taksometr (client) manbai."""
-    final_price: float = Field(..., gt=0, description="Taksometr yakuniy narxi")
-    distance_km: float = Field(0.0, ge=0, le=1000, description="Yakuniy masofa (km)")
-
-
 @trip_router.post("/{order_id}/start", response_model=OrderResponse)
-async def start_trip(order_id: int, driver_id: int, db: AsyncSession = Depends(get_db)):
-    """Safar boshlanishi (Botdagi 'Yo'lga chiqdik' tugmasi)"""
-    return await TripService.start_trip(db, order_id, driver_id)
+async def start_trip(
+    order_id: int,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    current_driver: Driver = Depends(get_current_driver),
+):
+    """Safar boshlanishi — JWT (Bearer) bilan faqat biriktirilgan haydovchi."""
+    _ip = client_ip_from_request(request)
+    try:
+        return await TripService.start_trip(db, order_id, current_driver.id)
+    except HTTPException as e:
+        if e.status_code == 403:
+            logger.warning(
+                "start_trip denied: order_id=%s ip=%s driver_id=%s detail=%s",
+                order_id,
+                _ip,
+                current_driver.id,
+                e.detail,
+            )
+        raise
 
 
 @trip_router.post("/{order_id}/complete", response_model=OrderResponse)
 async def complete_trip(
     order_id: int,
-    driver_id: int,
-    body: TripCompleteBody,
     db: AsyncSession = Depends(get_db),
+    current_driver: Driver = Depends(get_current_driver),
 ):
-    """Safar yakunlanishi — narx/masofa client (taksometr) dan; server qayta hisoblamaydi."""
-    return await TripService.complete_trip(
-        db,
-        order_id,
-        driver_id,
-        final_price=body.final_price,
-        distance_km=body.distance_km,
-    )
+    """
+    Safar yakunlanishi — WebApp/Telegram bilan bir xil server narxi, komissiya/keshbek.
+    JWT (Bearer): haydovchi user; buyurtma driver_id bilan mos bo'lishi kerak.
+    """
+    return await TripService.complete_trip(db, order_id, current_driver.id)
 
 # ==================== ADMIN ENDPOINTS ====================
 class AdminLoginRequest(BaseModel):
@@ -387,23 +466,17 @@ async def admin_get_settings(
     db: AsyncSession = Depends(get_db),
     _admin: User = Depends(get_current_admin),
 ):
+    from app.services.settings_service import get_settings, SettingsLoadError
+
     try:
-        from app.services.settings_service import get_settings
         s = await get_settings(db)
         return SettingsResponse(**s.to_dict())
+    except SettingsLoadError as e:
+        logging.getLogger(__name__).error("admin_get_settings: %s", e)
+        raise HTTPException(status_code=500, detail="Settings could not be loaded from database")
     except Exception as e:
-        logging.getLogger(__name__).warning("admin_get_settings xato: %s", e)
-        return SettingsResponse(
-            min_price=5000,
-            price_per_km=2500,
-            commission_rate=10.0,
-            surge_multiplier=1.5,
-            is_surge_active=False,
-            cashback_percent=0.0,
-            max_bonus_usage_percent=0.0,
-            max_bonus_cap=5000.0,
-            price_per_min_waiting=500.0,
-        )
+        logging.getLogger(__name__).error("admin_get_settings xato: %s", e, exc_info=True)
+        raise HTTPException(status_code=500, detail="Failed to load settings")
 
 
 @admin_router.put("/settings", response_model=SettingsResponse)

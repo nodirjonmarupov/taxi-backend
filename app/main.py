@@ -454,6 +454,14 @@ async def lifespan(app: FastAPI) -> AsyncGenerator:
                 await session.execute(text("ALTER TABLE settings ADD COLUMN IF NOT EXISTS max_bonus_usage_percent FLOAT NOT NULL DEFAULT 0;"))
             except Exception:
                 pass
+            try:
+                await session.execute(text("ALTER TABLE settings ADD COLUMN IF NOT EXISTS max_bonus_cap FLOAT NOT NULL DEFAULT 5000;"))
+            except Exception:
+                pass
+            try:
+                await session.execute(text("ALTER TABLE settings ADD COLUMN IF NOT EXISTS price_per_min_waiting NUMERIC(10,2) NOT NULL DEFAULT 500;"))
+            except Exception:
+                pass
             # admin_logs
             await session.execute(text("""
                 CREATE TABLE IF NOT EXISTS admin_logs (

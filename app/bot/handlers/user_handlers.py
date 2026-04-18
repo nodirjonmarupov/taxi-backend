@@ -417,7 +417,7 @@ async def cashback_menu(message: Message, lang: str = "uz"):
 
             from app.services.settings_service import get_settings
             tariff = await get_settings(db)
-            cap = float(getattr(tariff, "max_bonus_cap", 5000.0) or 5000.0)
+            cap = float(tariff.max_bonus_cap)
 
             # ── Balans yetarli emas ──
             if balance < MIN_CASHBACK_BALANCE:

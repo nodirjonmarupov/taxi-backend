@@ -1,6 +1,5 @@
 """
-Settings service: Redis → SQL → config.
-Tariff narxlari, komissiya va surge uchun.
+Settings: faqat DB (id=1). Runtime uchun qat'iy — soxta defaultlar yo'q.
 """
 import json
 from dataclasses import dataclass
@@ -9,13 +8,17 @@ from typing import Optional
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.config import settings as config
 from app.core.redis import get_redis
 from app.core.logger import get_logger
 
 logger = get_logger(__name__)
 
 REDIS_SETTINGS_KEY = "taxi:settings"
+SETTINGS_REDIS_TTL_SEC = 30
+
+
+class SettingsLoadError(RuntimeError):
+    """settings jadvalidan id=1 o'qib bo'lmadi yoki bootstrap yiqildi."""
 
 
 @dataclass
@@ -27,8 +30,8 @@ class TariffSettings:
     is_surge_active: bool
     cashback_percent: float
     max_bonus_usage_percent: float
-    max_bonus_cap: float  # Absolyut limit: bir safardan ishlatiladigan maks bonus (so'm)
-    price_per_min_waiting: float = 500.0
+    max_bonus_cap: float
+    price_per_min_waiting: float
 
     def to_dict(self) -> dict:
         return {
@@ -44,89 +47,132 @@ class TariffSettings:
         }
 
 
-def _default_settings() -> TariffSettings:
-    """Business defaults when Redis and DB both fail."""
+# Faqat birinchi INSERT (ON CONFLICT DO NOTHING) uchun — runtime fallback EMAS.
+_BOOTSTRAP_SETTINGS_SQL = {
+    "min_price": 5000.0,
+    "price_per_km": 2500.0,
+    "commission_rate": 10.0,
+    "surge_multiplier": 1.5,
+    "is_surge_active": False,
+    "cashback_percent": 0.0,
+    "max_bonus_usage_percent": 0.0,
+    "max_bonus_cap": 5000.0,
+    "price_per_min_waiting": 500.0,
+}
+
+
+def _tariff_from_row(r) -> TariffSettings:
     return TariffSettings(
-        min_price=5000,
-        price_per_km=2500,
-        commission_rate=10.0,
-        surge_multiplier=1.5,
-        is_surge_active=False,
-        cashback_percent=0.0,
-        max_bonus_usage_percent=0.0,
-        max_bonus_cap=5000.0,
-        price_per_min_waiting=500.0,
+        min_price=float(r[0]),
+        price_per_km=float(r[1]),
+        commission_rate=float(r[2]),
+        surge_multiplier=float(r[3]),
+        is_surge_active=bool(r[4]),
+        cashback_percent=float(r[5] if r[5] is not None else 0.0),
+        max_bonus_usage_percent=float(r[6] if r[6] is not None else 0.0),
+        max_bonus_cap=float(r[7] if r[7] is not None else 0.0),
+        price_per_min_waiting=float(r[8] if r[8] is not None else 0.0),
     )
 
 
-def _settings_from_dict(data: dict) -> TariffSettings:
+def _tariff_from_flat_dict(d: dict) -> TariffSettings:
     return TariffSettings(
-        min_price=float(data.get("min_price", 5000)),
-        price_per_km=float(data.get("price_per_km", 2500)),
-        commission_rate=float(data.get("commission_rate", 10.0)),
-        surge_multiplier=float(data.get("surge_multiplier", 1.5)),
-        is_surge_active=bool(data.get("is_surge_active", False)),
-        cashback_percent=float(data.get("cashback_percent", 0.0)),
-        max_bonus_usage_percent=float(data.get("max_bonus_usage_percent", 0.0)),
-        max_bonus_cap=float(data.get("max_bonus_cap", 5000.0)),
-        price_per_min_waiting=float(data.get("price_per_min_waiting", 500.0)),
+        min_price=float(d["min_price"]),
+        price_per_km=float(d["price_per_km"]),
+        commission_rate=float(d["commission_rate"]),
+        surge_multiplier=float(d["surge_multiplier"]),
+        is_surge_active=bool(d["is_surge_active"]),
+        cashback_percent=float(d["cashback_percent"]),
+        max_bonus_usage_percent=float(d["max_bonus_usage_percent"]),
+        max_bonus_cap=float(d["max_bonus_cap"]),
+        price_per_min_waiting=float(d["price_per_min_waiting"]),
     )
+
+
+async def _fetch_settings_row(db: AsyncSession) -> Optional[TariffSettings]:
+    try:
+        row = await db.execute(
+            text(
+                "SELECT min_price, price_per_km, commission_rate, surge_multiplier, is_surge_active, "
+                "cashback_percent, max_bonus_usage_percent, max_bonus_cap, "
+                "COALESCE(price_per_min_waiting, 500) FROM settings WHERE id = 1"
+            )
+        )
+        r = row.fetchone()
+        if not r:
+            return None
+        return _tariff_from_row(r)
+    except Exception as e:
+        logger.warning("settings SELECT failed: %s", e)
+        return None
+
+
+async def ensure_settings_row(db: AsyncSession) -> None:
+    await db.execute(
+        text(
+            """
+            INSERT INTO settings (
+                id, min_price, price_per_km, commission_rate, surge_multiplier, is_surge_active,
+                cashback_percent, max_bonus_usage_percent, max_bonus_cap, price_per_min_waiting
+            )
+            VALUES (
+                1, :min_price, :price_per_km, :commission_rate, :surge_multiplier, :is_surge_active,
+                :cashback_percent, :max_bonus_usage_percent, :max_bonus_cap, :price_per_min_waiting
+            )
+            ON CONFLICT (id) DO NOTHING
+            """
+        ),
+        _BOOTSTRAP_SETTINGS_SQL,
+    )
+
+
+def _write_settings_redis_cache(s: TariffSettings) -> None:
+    redis = get_redis()
+    if redis is None:
+        return
+    try:
+        redis.set(REDIS_SETTINGS_KEY, json.dumps(s.to_dict()), ex=SETTINGS_REDIS_TTL_SEC)
+    except Exception as e:
+        logger.debug("Redis settings cache skipped: %s", e)
 
 
 async def get_settings(db: AsyncSession | None = None) -> TariffSettings:
-    """
-    Redis → SQL → config ketma-ketligida settings olish.
-    db berilmasa, faqat Redis va config tekshiriladi (yangi sessiya ochilmaydi).
-    """
-    redis = get_redis()
-    if redis is not None:
-        try:
-            raw = redis.get(REDIS_SETTINGS_KEY)
-            if raw:
-                if isinstance(raw, bytes):
-                    raw = raw.decode("utf-8")
-                data = json.loads(raw)
-                return _settings_from_dict(data)
-        except Exception as e:
-            logger.debug(f"Redis'dan settings olinmadi: {e}")
+    from app.core.database import AsyncSessionLocal
 
-    if db:
+    async def _load(db_sess: AsyncSession) -> TariffSettings:
+        s = await _fetch_settings_row(db_sess)
+        if s is None:
+            await ensure_settings_row(db_sess)
+            s = await _fetch_settings_row(db_sess)
+        if s is None:
+            raise SettingsLoadError("settings id=1 could not be loaded after bootstrap")
+        _write_settings_redis_cache(s)
+        logger.debug(
+            "[SETTINGS LOADED] source=database id=1 | min_price=%s price_per_km=%s cashback_percent=%s",
+            s.min_price,
+            s.price_per_km,
+            s.cashback_percent,
+        )
+        return s
+
+    if db is not None:
+        return await _load(db)
+
+    async with AsyncSessionLocal() as session:
         try:
-            row = await db.execute(
-                text(
-                    "SELECT min_price, price_per_km, commission_rate, surge_multiplier, is_surge_active, "
-                    "cashback_percent, max_bonus_usage_percent, max_bonus_cap, "
-                    "COALESCE(price_per_min_waiting, 500) FROM settings WHERE id = 1"
-                )
-            )
-            r = row.fetchone()
-            if r:
-                s = TariffSettings(
-                    min_price=float(r[0]),
-                    price_per_km=float(r[1]),
-                    commission_rate=float(r[2]),
-                    surge_multiplier=float(r[3]),
-                    is_surge_active=bool(r[4]),
-                    cashback_percent=float(r[5] or 0.0),
-                    max_bonus_usage_percent=float(r[6] or 0.0),
-                    max_bonus_cap=float(r[7] or 5000.0),
-                    price_per_min_waiting=float(r[8] or 500.0),
-                )
-                redis = get_redis()
-                if redis is not None:
-                    try:
-                        redis.set(REDIS_SETTINGS_KEY, json.dumps(s.to_dict()), ex=3600)
-                    except Exception:
-                        pass
-                return s
-        except Exception as e:
-            logger.debug(f"SQL'dan settings olinmadi: {e}")
+            out = await _load(session)
+            await session.commit()
+            return out
+        except Exception:
             try:
-                await db.rollback()
+                await session.rollback()
             except Exception:
                 pass
+            raise
 
-    return _default_settings()
+
+async def get_current_settings(db: AsyncSession | None = None) -> TariffSettings:
+    return await get_settings(db)
 
 
 async def update_settings(
@@ -143,9 +189,6 @@ async def update_settings(
     price_per_min_waiting: Optional[float] = None,
     admin_user_id: Optional[int] = None,
 ) -> TariffSettings:
-    """
-    Settings yangilash: DB + Redis + admin_logs.
-    """
     redis = get_redis()
     if redis:
         try:
@@ -208,30 +251,30 @@ async def update_settings(
     redis = get_redis()
     if redis is not None:
         try:
-            redis.set(REDIS_SETTINGS_KEY, json.dumps(new_values), ex=3600)
+            redis.set(REDIS_SETTINGS_KEY, json.dumps(new_values), ex=SETTINGS_REDIS_TTL_SEC)
         except Exception as e:
-            logger.warning(f"Redis settings yangilanmadi: {e}")
+            logger.warning("Redis settings yangilanmadi: %s", e)
 
     if admin_user_id is not None:
         try:
             await db.execute(
-                text("INSERT INTO admin_logs (admin_user_id, action, details) VALUES (:uid, 'settings_update', CAST(:details AS JSONB))"),
+                text(
+                    "INSERT INTO admin_logs (admin_user_id, action, details) VALUES "
+                    "(:uid, 'settings_update', CAST(:details AS JSONB))"
+                ),
                 {"uid": admin_user_id, "details": json.dumps(updates)},
             )
         except Exception as e:
-            logger.warning(f"Admin log yozilmadi: {e}")
+            logger.warning("Admin log yozilmadi: %s", e)
 
     await db.commit()
-    return _settings_from_dict(new_values)
+    return _tariff_from_flat_dict(new_values)
 
 
 def calculate_price(
     distance_km: float,
     s: TariffSettings,
 ) -> float:
-    """
-    Masofa bo'yicha narx (PricingService — 100 so'm yaxlitlash).
-    """
     from app.services.pricing_service import PricingService
 
     return PricingService.apply_tariff_and_round_to_100(distance_km, s)

@@ -8,7 +8,9 @@
         throw new Error('HTTPS required');
     }
 })();
-let TARIFF = { startPrice: 5000, pricePerKm: 2500, pricePerMinWaiting: 500, minDistanceUpdate: 0.02 };
+/** Taksometr: narx faqat server /trip-meter estimated_fare dan (hardcoded tariff yo'q). */
+let TARIFF = null;
+let TARIFF_LOAD_ERROR = false;
 let ORDER_DATA = null;
 const tg = (window.Telegram && window.Telegram.WebApp) ? window.Telegram.WebApp : { expand: function(){}, ready: function(){} };
 
@@ -76,9 +78,23 @@ let intervals = { timer: null, position: null };
 
 const API_BASE_URL = window.__WEBAPP_BASE_URL__ || window.location.origin;
 fetch(API_BASE_URL + '/api/webapp/tariff?v=' + Date.now(), { headers: { 'ngrok-skip-browser-warning': '1' } })
-    .then(function(r){ return r.json(); })
-    .then(function(d){ TARIFF.startPrice = d.startPrice||5000; TARIFF.pricePerKm = d.pricePerKm||2500; TARIFF.pricePerMinWaiting = d.pricePerMinWaiting||500; TARIFF.minDistanceUpdate = d.minDistanceUpdate||0.02; })
-    .catch(function(){});
+    .then(function(r){ if (!r.ok) throw new Error('tariff http'); return r.json(); })
+    .then(function(d){
+        if (!d || d.startPrice == null || isNaN(Number(d.startPrice))) throw new Error('tariff bad');
+        TARIFF = {
+            startPrice: Number(d.startPrice),
+            pricePerKm: Number(d.pricePerKm),
+            pricePerMinWaiting: Number(d.pricePerMinWaiting),
+            minDistanceUpdate: d.minDistanceUpdate != null ? Number(d.minDistanceUpdate) : 0.02
+        };
+    })
+    .catch(function(){
+        TARIFF_LOAD_ERROR = true;
+        try {
+            var el = document.getElementById('statusText');
+            if (el) el.textContent = "Tarif yuklanmadi. Sahifani yangilang.";
+        } catch (_) {}
+    });
 const urlParams = new URLSearchParams(window.location.search);
 const ORDER_ID_CURRENT = urlParams.get('order_id');
 const WEBAPP_TOKEN = urlParams.get('token');
@@ -183,7 +199,6 @@ function maybeSyncToServer() {
 }
 function sendPendingItem(item) {
     var params = new URLSearchParams({ new_status: 'completed' });
-    params.set('final_price', String(item.final_price));
     if (item.distance_km != null && !isNaN(Number(item.distance_km))) {
         params.set('distance_km', String(item.distance_km));
     }
@@ -204,11 +219,12 @@ function handleTripSyncSuccess(item) {
     if (ORDER_DATA) ORDER_DATA.status = 'completed';
     var loadingEl = document.getElementById('loading');
     if (loadingEl) loadingEl.classList.add('hidden');
-    var finalFareStr = String(item.final_price);
+    var finalFareStr = (item.display_fare != null && item.display_fare !== '')
+        ? String(item.display_fare)
+        : 'server';
     var payload = {
         status: 'finished',
         order_id: parseInt(item.orderId, 10),
-        final_price: parseFloat(item.final_price) || 0,
         distance_km: item.distance_km != null ? item.distance_km : 0
     };
     if (tg && tg.showAlert) {
@@ -2158,18 +2174,14 @@ function handleFinish() {
 async function finishTrip() {
     var orderId = ORDER_ID_CURRENT;
     if (!orderId) { safeAlert("Order ID topilmadi."); return; }
-    var fareEl = document.getElementById('currentFare');
-    if (!fareEl) { safeAlert("UI topilmadi."); return; }
-    var finalFare = fareEl.textContent.replace(/,/g, '');
-    var distKm = tripData.distance;
-    var fp = parseFloat(finalFare);
-    if (isNaN(fp) || fp <= 0) {
-        safeAlert("Taksometr narxi noto'g'ri. Sahifani yangilab qayta urinib ko'ring.");
+    if (tripData.serverFare == null || isNaN(Number(tripData.serverFare))) {
+        safeAlert("Server narxi tayyor emas. Internetni tekshiring yoki biroz kuting.");
         return;
     }
+    var distKm = tripData.distance;
     var item = {
         orderId: orderId,
-        final_price: fp,
+        display_fare: tripData.serverFare,
         distance_km: distKm,
         token: WEBAPP_TOKEN || '',
         apiBaseUrl: API_BASE_URL
@@ -2210,30 +2222,22 @@ function updateTimer() {
     updateTaximeter();
 }
 
-/** Tiered waiting fee (so'm) — keep in sync with server compute_waiting_fee. */
-function calculateWaitingFee(waitingSeconds) {
-    if (!waitingSeconds || waitingSeconds <= 0) return 0;
-    var minutes = Math.ceil(waitingSeconds / 60);
-    return 1000 + Math.max(0, minutes - 1) * 500;
-}
-
+/** Faqat server estimated_fare (HALF_UP 100) — klient hisoblamaydi. */
 function updateTaximeter() {
-    var surge = tripData.surge != null && !isNaN(Number(tripData.surge)) ? Number(tripData.surge) : 1;
-    var distancePart = tripData.distance * TARIFF.pricePerKm;
-    var surgedDistance = distancePart * surge;
-    var distanceFare = TARIFF.startPrice + surgedDistance;
-    var waitingFee = calculateWaitingFee(tripData.waitingTime);
-    var uiFare = distanceFare + waitingFee;
-    if (!tripData.isWaiting && !_resumeInFlight && tripData.serverFare != null) {
-        if (Math.abs(tripData.serverFare - uiFare) > 100) {
-            uiFare = tripData.serverFare;
-        }
-    }
-    var rounded = Math.round(uiFare / 100) * 100;
     var curFareEl = document.getElementById('currentFare');
     var tripDistEl = document.getElementById('tripDistance');
-    if (curFareEl) curFareEl.textContent = rounded.toLocaleString('en-US');
     if (tripDistEl) tripDistEl.textContent = tripData.distance.toFixed(2);
+    if (!curFareEl) return;
+    if (TARIFF_LOAD_ERROR) {
+        curFareEl.textContent = '—';
+        return;
+    }
+    var sf = tripData.serverFare;
+    if (sf != null && !isNaN(Number(sf))) {
+        curFareEl.textContent = Math.round(Number(sf)).toLocaleString('en-US');
+        return;
+    }
+    curFareEl.textContent = '…';
 }
 
 window.addEventListener('online', async () => {
