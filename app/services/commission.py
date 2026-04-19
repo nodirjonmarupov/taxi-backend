@@ -272,10 +272,11 @@ async def deduct_commission_on_trip_complete(
         # ── 10. Cashback EARN (sozlamalar: yakuniy narx foizi) ──
         if cashback_percent > 0 and total_price_dec > 0:
             earned_cashback = Decimal(
-                round_to_100_half_up(
-                    total_price_dec * cashback_percent / Decimal("100")
-                )
+                int(total_price_dec * cashback_percent / Decimal("100"))
             )
+        logger.info(
+            f"[CASHBACK_DEBUG] total_price={total_price_dec} percent={cashback_percent} earned={earned_cashback}"
+        )
         if user is not None and earned_cashback > 0:
             user.bonus_balance = float(_to_dec(user.bonus_balance) + earned_cashback)
             session.add(BonusTransaction(

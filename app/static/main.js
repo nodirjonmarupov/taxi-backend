@@ -74,7 +74,7 @@ const TSVG = {
 let appState = 'arriving';
 let tripData = { distance: 0, waitingTime: 0, elapsedSeconds: 0, isWaiting: false, lastPosition: null, serverFare: null, surge: 1 };
 let _resumeInFlight = false;
-let intervals = { timer: null, position: null };
+let intervals = { timer: null, position: null, tripMeterPoll: null };
 
 const API_BASE_URL = window.__WEBAPP_BASE_URL__ || window.location.origin;
 fetch(API_BASE_URL + '/api/webapp/tariff?v=' + Date.now(), { headers: { 'ngrok-skip-browser-warning': '1' } })
@@ -103,6 +103,61 @@ function webappHeaders() {
     if (WEBAPP_TOKEN) h['X-WebApp-Token'] = WEBAPP_TOKEN;
     return h;
 }
+
+function getTripOrderIdForApi() {
+    return (ORDER_DATA && ORDER_DATA.id != null) ? ORDER_DATA.id : ORDER_ID_CURRENT;
+}
+
+function applyTripMeterPayload(data) {
+    if (data != null) console.log("trip-meter active:", data.active);
+    if (!data || !data.active) return;
+    if (data.distance_km != null) tripData.distance = data.distance_km;
+    if (!tripData.isWaiting) {
+        if (data.waiting_seconds != null) tripData.waitingTime = data.waiting_seconds;
+    }
+    tripData.isWaiting = !!data.is_waiting;
+    tripData.surge = (data.surge_multiplier != null && data.surge_multiplier !== undefined)
+        ? Number(data.surge_multiplier)
+        : (tripData.surge || 1);
+    if (data.estimated_fare != null) tripData.serverFare = data.estimated_fare;
+    if (data.elapsed_seconds != null && !isNaN(Number(data.elapsed_seconds))) {
+        tripData.elapsedSeconds = Number(data.elapsed_seconds) || 0;
+    }
+    updateTaximeter();
+}
+
+function fetchTripMeterSnapshot() {
+    var oid = getTripOrderIdForApi();
+    if (!oid || !WEBAPP_TOKEN || appState !== 'trip') return Promise.resolve();
+    return fetch(API_BASE_URL + '/api/webapp/order/' + oid + '/trip-meter?v=' + Date.now(), {
+        headers: webappHeaders(),
+        cache: 'no-store'
+    })
+        .then(function(r) {
+            if (!r.ok) return null;
+            return r.json();
+        })
+        .then(function(data) {
+            if (data) applyTripMeterPayload(data);
+        })
+        .catch(function() {});
+}
+
+function startTripMeterPolling() {
+    if (intervals.tripMeterPoll != null) return;
+    intervals.tripMeterPoll = setInterval(function() {
+        if (appState === 'trip') fetchTripMeterSnapshot();
+    }, 3000);
+    if (appState === 'trip') fetchTripMeterSnapshot();
+}
+
+function stopTripMeterPolling() {
+    if (intervals.tripMeterPoll != null) {
+        clearInterval(intervals.tripMeterPoll);
+        intervals.tripMeterPoll = null;
+    }
+}
+
 if (ORDER_ID_CURRENT) console.log("Joriy buyurtma ID:", ORDER_ID_CURRENT);
 const MAX_DISTANCE_KM = 500;
 
@@ -216,6 +271,7 @@ function handleTripSyncSuccess(item) {
     try {
         clearInterval(intervals.timer);
     } catch (e) {}
+    stopTripMeterPolling();
     if (ORDER_DATA) ORDER_DATA.status = 'completed';
     var loadingEl = document.getElementById('loading');
     if (loadingEl) loadingEl.classList.add('hidden');
@@ -911,6 +967,9 @@ function activateTaximeterUI() {
     if (!intervals.timer) {
         intervals.timer = setInterval(updateTimer, 1000);
     }
+    if (appState === 'trip') {
+        startTripMeterPolling();
+    }
 }
 
 async function init() {
@@ -1184,11 +1243,15 @@ function sendDriverLocationToBackend(lat, lng, heading) {
         heading: heading
     };
     if (ORDER_ID_CURRENT) body.order_id = parseInt(ORDER_ID_CURRENT, 10);
-    fetch(API_BASE_URL + '/api/webapp/update_driver_location?v=' + Date.now(), {
+    return fetch(API_BASE_URL + '/api/webapp/update_driver_location?v=' + Date.now(), {
         method: 'POST',
         headers: webappHeaders(),
         body: JSON.stringify(body)
-    }).then(function(){}).catch(function(){});
+    })
+        .then(function(r) {
+            if (appState === 'trip' && r && r.ok) fetchTripMeterSnapshot();
+        })
+        .catch(function() {});
 }
 function startDriverTracking() {
     if (intervals.position != null) return;
@@ -2116,6 +2179,7 @@ async function handleStartTrip() {
             }
         }
     } catch (_tmE) {}
+    startTripMeterPolling();
 }
 
 function toggleWaiting() {
@@ -2149,7 +2213,7 @@ function toggleWaiting() {
                 .then(function(data) {
                     if (data && data.active) {
                         tripData.waitingTime = data.waiting_seconds || tripData.waitingTime;
-                        tripData.serverFare = data.estimated_fare || null;
+                        tripData.serverFare = (data.estimated_fare != null ? data.estimated_fare : null);
                     }
                 })
                 .finally(function() {
@@ -2229,8 +2293,7 @@ function updateTaximeter() {
     if (tripDistEl) tripDistEl.textContent = tripData.distance.toFixed(2);
     if (!curFareEl) return;
     if (TARIFF_LOAD_ERROR) {
-        curFareEl.textContent = '—';
-        return;
+        console.warn("Tariff load error, but showing server fare");
     }
     var sf = tripData.serverFare;
     if (sf != null && !isNaN(Number(sf))) {
