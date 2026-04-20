@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from copy import deepcopy
 from datetime import datetime
-from math import ceil
+from math import floor
 from decimal import Decimal
 from typing import Any, Dict, Optional, Union
 
@@ -93,23 +93,30 @@ def compute_fare(
 ) -> Decimal:
     """
     Billing (frozen tariff_snapshot per trip, Decimal math):
-      total = max(min_price, distance_km * km_price * surge + waiting_minutes * price_per_min_waiting)
-    Surge clamped [1,2] here, faqat masofa qismiga. Keyin round_to (100 so'm).
+      distance_part = distance_km * km_price * surge (surge [1,2] faqat masofa)
+      Kutish (biznes qoidasi): 1..60s => 1000 so'm, har keyingi to'liq daqiqa +500 so'm.
+        waiting_part = 0 if waiting_seconds <= 0
+        else 1000 + floor((waiting_seconds - 1) / 60) * 500
+      base_total = max(min_price, distance_part)  -- minimal safar narxi
+      total = base_total + waiting_part           -- kutish alohida ustiga qo'shiladi
+    Keyin round_to (100 so'm).
     """
     min_price = Decimal(str(tariff_snapshot.get("base", 0)))
     km_p = Decimal(str(tariff_snapshot.get("km", 0)))
-    wait_p = Decimal(str(tariff_snapshot.get("wait", 0)))
     surge = Decimal(str(tariff_snapshot.get("surge_multiplier", 1)))
     surge = max(Decimal("1.0"), surge)
     surge = min(Decimal("2.0"), surge)
     d_km = Decimal(str(distance_km))
 
     ws = float(waiting_seconds or 0)
-    wait_min = Decimal(str(int(ceil(ws / 60.0)) if ws > 0 else 0))
+    if ws <= 0:
+        waiting_part = Decimal("0")
+    else:
+        extra_blocks = int(floor((ws - 1.0) / 60.0))
+        waiting_part = Decimal("1000") + Decimal(str(extra_blocks)) * Decimal("500")
     distance_part = d_km * km_p * surge
-    waiting_part = wait_min * wait_p
-    subtotal = distance_part + waiting_part
-    total = max(min_price, subtotal)
+    base_total = max(min_price, distance_part)
+    total = base_total + waiting_part
     if round_to <= 0:
         return total
     return Decimal(round_to_100_half_up(total))

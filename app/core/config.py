@@ -110,6 +110,8 @@ class Settings(BaseSettings):
     SEARCH_RADIUS_KM: float = 10.0   # Search radius for driver matching
     RELAX_VERIFIED_FOR_MATCHING: bool = True   # Include unverified drivers in matching (False = verified only)
     LOCATION_FRESHNESS_SECONDS: int = 600
+    # GET /api/webapp/order/.../trip-meter: verbose diagnostic log (dev only; env TRIP_METER_DEBUG=true)
+    TRIP_METER_DEBUG: bool = False
     # Test / dev: yumshoq matching (ishlab chiqarishda .env orqali MATCHING_TEST_MODE=false)
     MATCHING_TEST_MODE: bool = True
     MATCHING_LOCATION_AGE_SECONDS: int = 36000  # test rejimida yosh filtri qoldirilsa — 10 soat

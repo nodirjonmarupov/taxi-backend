@@ -12,6 +12,7 @@ from sqlalchemy import text, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from pydantic import BaseModel
 
+from app.core.config import settings
 from app.core.database import get_db
 from app.core.redis import get_redis, get_trip_state, set_trip_state, delete_trip_state
 from app.utils.webapp_token import verify_webapp_token
@@ -710,21 +711,22 @@ async def trip_meter(
     _min_p = float(snap.get("base", 0) or 0)
     _km_p = float(snap.get("km", 0) or 0)
     _wait_p = float(snap.get("wait", 0) or 0)
-    logger.info(
-        "[TRIP_METER_DEBUG] order_id=%s active=%s distance_km=%s waiting_seconds_stored=%s "
-        "waiting_seconds_effective=%s min_price=%s price_per_km=%s price_per_min_waiting=%s "
-        "surge_multiplier=%s estimated_fare=%s",
-        order_id,
-        True,
-        _dist_out,
-        ws_stored,
-        ws_effective,
-        _min_p,
-        _km_p,
-        _wait_p,
-        _surge_out,
-        int(est),
-    )
+    if settings.TRIP_METER_DEBUG:
+        logger.debug(
+            "[TRIP_METER_DEBUG] order_id=%s active=%s distance_km=%s waiting_seconds_stored=%s "
+            "waiting_seconds_effective=%s min_price=%s price_per_km=%s price_per_min_waiting=%s "
+            "surge_multiplier=%s estimated_fare=%s",
+            order_id,
+            True,
+            _dist_out,
+            ws_stored,
+            ws_effective,
+            _min_p,
+            _km_p,
+            _wait_p,
+            _surge_out,
+            int(est),
+        )
     return {
         "active": True,
         "distance_km": _dist_out,

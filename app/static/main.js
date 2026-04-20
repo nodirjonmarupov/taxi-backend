@@ -2200,7 +2200,6 @@ function toggleWaiting() {
             }).catch(function() {});
         } else {
             _resumeInFlight = true;
-            tripData.serverFare = null;
             fetch(API_BASE_URL + '/api/webapp/order/' + oid + '/trip/resume?v=' + Date.now(), {
                 method: 'POST',
                 headers: webappHeaders()
