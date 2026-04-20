@@ -6,10 +6,11 @@ import json
 import logging
 import secrets
 from typing import List, Optional
-from datetime import datetime
+from datetime import datetime, date, time, timedelta
 from fastapi import APIRouter, Depends, HTTPException, status, Query, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func, cast, Date, text, or_
+from sqlalchemy.orm import aliased
 from pydantic import BaseModel, Field, field_validator
 
 from app.core.database import get_db
@@ -767,10 +768,26 @@ class AdminUserItem(BaseModel):
 async def admin_list_users(
     skip: int = Query(0, ge=0),
     limit: int = Query(50, ge=1, le=100),
+    search: Optional[str] = Query(None, min_length=1),
     db: AsyncSession = Depends(get_db),
     _admin: User = Depends(get_current_admin),
 ):
-    q = select(User).offset(skip).limit(limit)
+    q = select(User)
+    if search:
+        s = search.strip()
+        conditions = [
+            User.first_name.ilike(f"%{s}%"),
+            User.phone.ilike(f"%{s}%"),
+        ]
+        if s.isdigit():
+            try:
+                n = int(s)
+                conditions.append(User.id == n)
+                conditions.append(User.telegram_id == n)
+            except ValueError:
+                pass
+        q = q.where(or_(*conditions))
+    q = q.order_by(User.id.desc()).offset(skip).limit(limit)
     result = await db.execute(q)
     users = result.scalars().all()
     return [
@@ -786,6 +803,217 @@ async def admin_list_users(
         )
         for u in users
     ]
+
+
+# --- Admin Orders (Phase 1: read-only list + detail) ---
+class AdminOrderItem(BaseModel):
+    id: int
+    created_at: Optional[datetime] = None
+    completed_at: Optional[datetime] = None
+    status: str
+    user_id: Optional[int] = None
+    user_name: Optional[str] = None
+    user_phone: Optional[str] = None
+    driver_id: Optional[int] = None
+    driver_name: Optional[str] = None
+    driver_phone: Optional[str] = None
+    driver_car: Optional[str] = None
+    distance_km: Optional[float] = None
+    final_price: Optional[float] = None
+    estimated_price: Optional[float] = None
+    used_bonus: Optional[float] = None
+    earned_cashback: Optional[float] = None  # not stored on Order; returned as null
+    commission: Optional[float] = None       # not stored on Order; returned as null
+
+
+class AdminOrderDetail(AdminOrderItem):
+    pickup_address: Optional[str] = None
+    destination_address: Optional[str] = None
+    accepted_at: Optional[datetime] = None
+    started_at: Optional[datetime] = None
+    cancelled_at: Optional[datetime] = None
+    commission_deducted_at: Optional[datetime] = None
+    is_bonus_requested: Optional[bool] = None
+    frozen_bonus: Optional[float] = None
+
+
+def _build_order_item(order: Order, client: Optional[User], driver: Optional[Driver], driver_user: Optional[User]) -> AdminOrderItem:
+    def _f(v):
+        if v is None:
+            return None
+        try:
+            return float(v)
+        except (TypeError, ValueError):
+            return None
+
+    car_parts = []
+    if driver is not None:
+        if getattr(driver, "car_model", None):
+            car_parts.append(str(driver.car_model))
+        if getattr(driver, "car_number", None):
+            car_parts.append(str(driver.car_number))
+    car_str = " ".join(car_parts).strip() or None
+
+    driver_name = None
+    driver_phone = None
+    if driver_user is not None:
+        driver_name = getattr(driver_user, "first_name", None)
+        driver_phone = getattr(driver_user, "phone", None)
+
+    return AdminOrderItem(
+        id=order.id,
+        created_at=getattr(order, "created_at", None),
+        completed_at=getattr(order, "completed_at", None) or getattr(order, "finished_at", None),
+        status=str(order.status),
+        user_id=getattr(order, "user_id", None),
+        user_name=getattr(client, "first_name", None) if client else None,
+        user_phone=getattr(client, "phone", None) if client else None,
+        driver_id=getattr(order, "driver_id", None),
+        driver_name=driver_name,
+        driver_phone=driver_phone,
+        driver_car=car_str,
+        distance_km=_f(getattr(order, "distance_km", None)),
+        final_price=_f(getattr(order, "final_price", None)),
+        estimated_price=_f(getattr(order, "estimated_price", None)),
+        used_bonus=_f(getattr(order, "used_bonus", None)),
+        earned_cashback=None,
+        commission=None,
+    )
+
+
+# Uzbekistan is UTC+5 (no DST). Order.created_at is stored as naive UTC
+# (default=datetime.utcnow), so filtering by a local UZ calendar date requires
+# shifting the date-boundary back by 5 hours before comparing to created_at.
+UZ_UTC_OFFSET = timedelta(hours=5)
+
+
+@admin_router.get("/orders", response_model=List[AdminOrderItem])
+async def admin_list_orders(
+    skip: int = Query(0, ge=0),
+    limit: int = Query(50, ge=1, le=200),
+    status_filter: Optional[str] = Query(
+        None, alias="status", min_length=1,
+        description="Buyurtma statusi (pending/accepted/in_progress/completed/cancelled)",
+    ),
+    date_from: Optional[date] = Query(None, description="Local UZ date YYYY-MM-DD (inclusive)"),
+    date_to: Optional[date] = Query(None, description="Local UZ date YYYY-MM-DD (inclusive)"),
+    user_search: Optional[str] = Query(None, min_length=1),
+    driver_search: Optional[str] = Query(None, min_length=1),
+    db: AsyncSession = Depends(get_db),
+    _admin: User = Depends(get_current_admin),
+):
+    # Default date range = "today" from the operator's local UZ perspective.
+    # Example: if server UTC is 2026-04-20 21:30Z, UZ local is 2026-04-21 02:30,
+    # so today-for-operator is 2026-04-21.
+    if date_from is None and date_to is None:
+        uz_today = (datetime.utcnow() + UZ_UTC_OFFSET).date()
+        date_from = uz_today
+        date_to = uz_today
+
+    DriverUserAlias = aliased(User)
+
+    q = (
+        select(Order, User, Driver, DriverUserAlias)
+        .join(User, Order.user_id == User.id)
+        .outerjoin(Driver, Order.driver_id == Driver.id)
+        .outerjoin(DriverUserAlias, Driver.user_id == DriverUserAlias.id)
+    )
+
+    if status_filter:
+        q = q.where(Order.status == status_filter)
+
+    # Local UZ midnight -> naive UTC: subtract +05:00 offset.
+    # date_from local 2026-04-20 -> UTC >= 2026-04-19 19:00:00
+    # date_to   local 2026-04-20 -> UTC <  2026-04-20 19:00:00
+    if date_from is not None:
+        dt_from_utc = datetime.combine(date_from, time.min) - UZ_UTC_OFFSET
+        q = q.where(Order.created_at >= dt_from_utc)
+    if date_to is not None:
+        dt_to_excl_utc = datetime.combine(date_to + timedelta(days=1), time.min) - UZ_UTC_OFFSET
+        q = q.where(Order.created_at < dt_to_excl_utc)
+
+    if user_search:
+        us = user_search.strip()
+        us_conds = [
+            User.first_name.ilike(f"%{us}%"),
+            User.phone.ilike(f"%{us}%"),
+        ]
+        if us.isdigit():
+            try:
+                n = int(us)
+                us_conds.append(User.id == n)
+                us_conds.append(User.telegram_id == n)
+            except ValueError:
+                pass
+        q = q.where(or_(*us_conds))
+
+    if driver_search:
+        ds = driver_search.strip()
+        ds_conds = [
+            DriverUserAlias.first_name.ilike(f"%{ds}%"),
+            DriverUserAlias.phone.ilike(f"%{ds}%"),
+            Driver.car_number.ilike(f"%{ds}%"),
+            Driver.car_model.ilike(f"%{ds}%"),
+        ]
+        if ds.isdigit():
+            try:
+                n = int(ds)
+                ds_conds.append(Driver.id == n)
+            except ValueError:
+                pass
+        q = q.where(or_(*ds_conds))
+
+    q = q.order_by(Order.id.desc()).offset(skip).limit(limit)
+
+    result = await db.execute(q)
+    rows = result.all()
+    out: List[AdminOrderItem] = []
+    for row in rows:
+        order, client, driver, driver_user = row[0], row[1], row[2], row[3]
+        out.append(_build_order_item(order, client, driver, driver_user))
+    return out
+
+
+@admin_router.get("/orders/{order_id}", response_model=AdminOrderDetail)
+async def admin_get_order(
+    order_id: int,
+    db: AsyncSession = Depends(get_db),
+    _admin: User = Depends(get_current_admin),
+):
+    DriverUserAlias = aliased(User)
+    q = (
+        select(Order, User, Driver, DriverUserAlias)
+        .join(User, Order.user_id == User.id)
+        .outerjoin(Driver, Order.driver_id == Driver.id)
+        .outerjoin(DriverUserAlias, Driver.user_id == DriverUserAlias.id)
+        .where(Order.id == order_id)
+    )
+    r = await db.execute(q)
+    row = r.first()
+    if row is None:
+        raise HTTPException(status_code=404, detail="Buyurtma topilmadi")
+    order, client, driver, driver_user = row[0], row[1], row[2], row[3]
+    base = _build_order_item(order, client, driver, driver_user)
+
+    def _f(v):
+        if v is None:
+            return None
+        try:
+            return float(v)
+        except (TypeError, ValueError):
+            return None
+
+    return AdminOrderDetail(
+        **base.model_dump(),
+        pickup_address=getattr(order, "pickup_address", None),
+        destination_address=getattr(order, "destination_address", None),
+        accepted_at=getattr(order, "accepted_at", None),
+        started_at=getattr(order, "started_at", None),
+        cancelled_at=getattr(order, "cancelled_at", None),
+        commission_deducted_at=getattr(order, "commission_deducted_at", None),
+        is_bonus_requested=getattr(order, "is_bonus_requested", None),
+        frozen_bonus=_f(getattr(order, "frozen_bonus", None)),
+    )
 
 
 # --- Admin Logs ---

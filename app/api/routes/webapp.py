@@ -686,13 +686,30 @@ async def trip_meter(
         snap = billing_fallback_tariff_no_stored_snapshot(
             float(s.min_price), float(s.price_per_km), float(s.price_per_min_waiting)
         )
-    est = compute_fare(snap, float(st.get("distance_km") or 0), float(st.get("waiting_seconds") or 0))
+    # Read-only live credit for an active manual pause: if pause_started_ts is set,
+    # add the elapsed paused time to waiting_seconds for THIS response only.
+    # Redis state is NOT mutated here; the authoritative credit is still applied
+    # exactly once in trip_resume. No double counting, because after resume
+    # pause_started_ts becomes None and ws_stored already includes the full
+    # paused interval.
+    ws_stored = float(st.get("waiting_seconds") or 0)
+    pts = st.get("pause_started_ts")
+    if pts is not None:
+        try:
+            live_paused = max(0.0, time.time() - float(pts))
+        except (TypeError, ValueError):
+            live_paused = 0.0
+        ws_effective = ws_stored + live_paused
+    else:
+        ws_effective = ws_stored
+
+    est = compute_fare(snap, float(st.get("distance_km") or 0), ws_effective)
     _raw_surge = float(snap.get("surge_multiplier") or 1.0)
     _surge_out = max(1.0, min(2.0, _raw_surge))
     return {
         "active": True,
         "distance_km": float(st.get("distance_km") or 0),
-        "waiting_seconds": float(st.get("waiting_seconds") or 0),
+        "waiting_seconds": ws_effective,
         "estimated_fare": int(est),
         "is_waiting": bool(st.get("is_waiting")),
         "status": st.get("status"),

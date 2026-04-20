@@ -164,10 +164,11 @@ async def _create_and_distribute_order(
     first_name: str,
     is_driver: bool,
     lang: str = "uz",
+    db_override=None,
 ):
     """Buyurtmani bazaga saqlab, haydovchilarga tarqatish (taksometr: estimated_price DB uchun hisoblanadi)."""
     try:
-        async with AsyncSessionLocal() as db:
+        async def _run_with_db(db):
             tariff = await get_settings(db)
             distance_km = 0.0
             estimated_price = PricingService.apply_tariff_and_round_to_100(distance_km, tariff)
@@ -347,6 +348,12 @@ async def _create_and_distribute_order(
                     reply_markup=get_main_keyboard(lang),
                 )
 
+        if db_override is not None:
+            await _run_with_db(db_override)
+        else:
+            async with AsyncSessionLocal() as db:
+                await _run_with_db(db)
+
     except Exception as e:
         logger.error(f"Buyurtma yaratish xato: {e}", exc_info=True)
         send_fn = message_or_callback.message.answer if isinstance(message_or_callback, CallbackQuery) else message_or_callback.answer
@@ -361,9 +368,11 @@ async def _create_and_distribute_order(
 
 @order_router.message(UserStates.waiting_for_pickup, F.location)
 async def pickup_location(message: Message, state: FSMContext, lang: str = "uz"):
-    """Lokatsiya qabul qilish -> tasdiqlash xabari va taymer. Til: bazadagi language_code yoki middleware lang.
+    """Lokatsiya qabul qilish -> order yaratish va matchingni darhol boshlash.
 
-    Tasdiqlash bosqichi FSM: OrderStates.confirm_order (UserStates ichida alohida holat yo'q).
+    Old confirm (10s) bosqichi olib tashlangan: user lokatsiya yuborgandan keyin buyurtma
+    darhol yaratiladi. Duplicate active orders: PENDING/ACCEPTED/IN_PROGRESS holatlarda
+    yangi order yaratilmaydi.
     """
     pickup_lat = message.location.latitude
     pickup_lon = message.location.longitude
@@ -383,40 +392,64 @@ async def pickup_location(message: Message, state: FSMContext, lang: str = "uz")
             driver_check = await DriverCRUD.get_by_user_id(db, user.id)
             is_driver = driver_check is not None
 
-        await state.update_data(
-            pickup_lat=pickup_lat,
-            pickup_lon=pickup_lon,
-            user_id=user.id,
-            first_name=user.first_name or "Mijoz",
-            is_driver=is_driver,
-            lang=user_lang,
-            use_taximeter_confirm=True,
-        )
-        # Tasdiqlash + inline tugmalar (Tasdiqlash / Bekor)
-        await state.set_state(OrderStates.confirm_order)
+            # Concurrency-safe: lock the user row so two parallel location messages
+            # cannot both pass the active-order check and create duplicates.
+            await db.execute(select(User).where(User.id == user.id).with_for_update())
 
-        # Tasdiq oynasi: faqat "Taksi chaqirishni tasdiqlaysizmi?" + taymer (oldindan narx yo'q)
-        text = _format_timer_message(CONFIRMATION_SECONDS, user_lang, "")
+            # Active-order guard: duplicate order yaratishni oldini olamiz.
+            active_row = await db.execute(
+                select(Order)
+                .where(Order.user_id == user.id)
+                .where(Order.status.in_([OrderStatus.PENDING, OrderStatus.ACCEPTED, OrderStatus.IN_PROGRESS]))
+                .order_by(Order.id.desc())
+                .limit(1)
+            )
+            active_order = active_row.scalar_one_or_none()
+            if active_order is not None:
+                await state.clear()
+                # Lokatsiya tugmasini yopish (reply keyboard persistent bo'lishi mumkin)
+                try:
+                    await message.answer("Sizda faol buyurtma bor.", reply_markup=ReplyKeyboardRemove())
+                except Exception:
+                    await message.answer("Sizda faol buyurtma bor.")
 
-        # ReplyKeyboardRemove bilan yuboriladigan matn Telegramda bo'sh bo'lmasligi kerak (\u200b rad etiladi).
-        dismiss_text = get_text(user_lang, "loc_received")
-        if not (dismiss_text or "").strip():
-            dismiss_text = "OK"
-        logger.info(f"Yuborilayotgan matn (klaviatura yopish): {dismiss_text!r}")
-        await message.answer(dismiss_text, reply_markup=ReplyKeyboardRemove())
+                # Faqat PENDING order user tomonidan bekor qilinadi (cancel_order handler shuni tekshiradi).
+                if active_order.status == OrderStatus.PENDING:
+                    cancel_kb = InlineKeyboardMarkup(inline_keyboard=[
+                        [InlineKeyboardButton(
+                            text=get_text(user_lang, "cancel_btn"),
+                            callback_data=f"cancel_order:{active_order.id}",
+                        )]
+                    ])
+                    await message.answer(
+                        f"Buyurtma #{active_order.id} hali kutyapti. Bekor qilish mumkin.",
+                        reply_markup=cancel_kb,
+                    )
+                else:
+                    await message.answer(
+                        f"Buyurtma #{active_order.id} allaqachon qabul qilingan yoki safar boshlangan.",
+                        reply_markup=get_main_keyboard(user_lang),
+                    )
+                return
 
-        from app.bot.telegram_bot import bot
-        logger.info(f"Yuborilayotgan matn (tasdiq taymeri): {text!r}")
-        msg = await message.answer(
-            text,
-            reply_markup=_confirm_kb(user_lang),
-        )
+            # Lokatsiya reply keyboard'ni yopamiz (Telegramda persistent bo'lishi mumkin)
+            try:
+                await message.answer("Joylashuv qabul qilindi.", reply_markup=ReplyKeyboardRemove())
+            except Exception:
+                await message.answer("Joylashuv qabul qilindi.")
 
-        key = (message.chat.id, msg.message_id)
-        task = asyncio.create_task(
-            _run_confirmation_timer(bot, message.chat.id, msg.message_id, state)
-        )
-        _confirmation_tasks[key] = task
+            await state.clear()
+            await _create_and_distribute_order(
+                message,
+                state,
+                float(pickup_lat),
+                float(pickup_lon),
+                user.id,
+                user.first_name or "Mijoz",
+                is_driver,
+                user_lang,
+                db_override=db,
+            )
 
     except Exception as e:
         logger.error(f"Pickup xato: {e}", exc_info=True)

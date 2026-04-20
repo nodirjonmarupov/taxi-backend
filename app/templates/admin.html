@@ -100,6 +100,7 @@
                 <a class="sidebar-item" data-tab="tariffs">💰 Tariflar</a>
                 <a class="sidebar-item" data-tab="drivers">🚕 Haydovchilar</a>
                 <a class="sidebar-item" data-tab="users">👥 Foydalanuvchilar</a>
+                <a class="sidebar-item" data-tab="orders">🧾 Buyurtmalar</a>
                 <a class="sidebar-item" data-tab="logs">📋 Loglar</a>
                 <a class="sidebar-item" data-tab="message">✉️ Xabar yuborish</a>
             </nav>
@@ -174,7 +175,64 @@
 
             <div id="users" class="tab-content hidden">
                 <div class="main-header"><h2>Foydalanuvchilar</h2></div>
-                <div class="card"><div id="usersList"></div></div>
+                <div class="card">
+                    <div style="margin-bottom:16px;display:flex;gap:8px;">
+                      <input type="text" id="userSearch"
+                        placeholder="ID, Telegram ID, ism yoki telefon..."
+                        style="flex:1;padding:10px;border-radius:8px;
+                        border:1px solid #333;background:#1a1a1a;
+                        color:white;font-size:14px;"
+                        oninput="searchUsers(this.value)">
+                      <button onclick="loadUsers()"
+                        style="padding:10px 16px;border-radius:8px;
+                        background:#276EF1;color:white;border:none;
+                        cursor:pointer;">🔍</button>
+                    </div>
+                    <div id="usersList"></div>
+                </div>
+            </div>
+
+            <div id="orders" class="tab-content hidden">
+                <div class="main-header"><h2>Buyurtmalar</h2></div>
+                <div class="card">
+                    <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:16px;align-items:flex-end;">
+                        <div style="flex:1;min-width:140px;">
+                            <label style="display:block;font-size:0.85rem;color:#94a3b8;margin-bottom:6px;">Sana (dan)</label>
+                            <input type="date" id="ordersDateFrom" style="width:100%;">
+                        </div>
+                        <div style="flex:1;min-width:140px;">
+                            <label style="display:block;font-size:0.85rem;color:#94a3b8;margin-bottom:6px;">Sana (gacha)</label>
+                            <input type="date" id="ordersDateTo" style="width:100%;">
+                        </div>
+                        <div style="flex:1;min-width:140px;">
+                            <label style="display:block;font-size:0.85rem;color:#94a3b8;margin-bottom:6px;">Status</label>
+                            <select id="ordersStatus" style="width:100%;padding:10px 14px;border-radius:8px;border:1px solid #475569;background:#0f172a;color:#e2e8f0;font-size:14px;">
+                                <option value="">(barchasi)</option>
+                                <option value="pending">pending</option>
+                                <option value="accepted">accepted</option>
+                                <option value="in_progress">in_progress</option>
+                                <option value="completed">completed</option>
+                                <option value="cancelled">cancelled</option>
+                            </select>
+                        </div>
+                        <div style="flex:1;min-width:180px;">
+                            <label style="display:block;font-size:0.85rem;color:#94a3b8;margin-bottom:6px;">Mijoz (ID / ism / tel)</label>
+                            <input type="text" id="ordersUserSearch" placeholder="Mijoz qidiruv">
+                        </div>
+                        <div style="flex:1;min-width:180px;">
+                            <label style="display:block;font-size:0.85rem;color:#94a3b8;margin-bottom:6px;">Haydovchi (ID / ism / tel / mashina)</label>
+                            <input type="text" id="ordersDriverSearch" placeholder="Haydovchi qidiruv">
+                        </div>
+                        <button onclick="loadOrders(0)" style="padding:10px 18px;">🔍 Qidirish</button>
+                        <button onclick="resetOrdersFilters()" style="padding:10px 14px;background:#334155;">↺ Bugun</button>
+                    </div>
+                    <div id="ordersList"></div>
+                    <div style="display:flex;gap:8px;margin-top:12px;align-items:center;">
+                        <button id="ordersPrev" onclick="ordersPrev()" style="background:#334155;">← Oldingi</button>
+                        <button id="ordersNext" onclick="ordersNext()" style="background:#334155;">Keyingi →</button>
+                        <span id="ordersPageInfo" style="color:#94a3b8;font-size:0.9rem;"></span>
+                    </div>
+                </div>
             </div>
 
             <div id="logs" class="tab-content hidden">
@@ -213,6 +271,22 @@
     <div id="modalContent"></div>
     <div style="display:flex;gap:8px;margin-top:20px;
       flex-wrap:wrap;" id="modalActions"></div>
+  </div>
+</div>
+
+<div id="orderModal" style="display:none;
+  position:fixed;inset:0;background:rgba(0,0,0,0.8);
+  z-index:9999;align-items:center;justify-content:center;">
+  <div style="background:#1a1a1a;border-radius:16px;
+    padding:28px;max-width:560px;width:90%;
+    max-height:85vh;overflow-y:auto;border:1px solid #333;">
+    <div style="display:flex;justify-content:space-between;
+      align-items:center;margin-bottom:20px;">
+      <h3 id="orderModalTitle" style="color:white;font-size:18px;">Buyurtma</h3>
+      <button onclick="closeOrderModal()"
+        style="background:none;border:none;color:white;font-size:24px;cursor:pointer;">✕</button>
+    </div>
+    <div id="orderModalContent"></div>
   </div>
 </div>
 
@@ -312,6 +386,7 @@ async function loadTab(name) {
     else if (name === 'tariffs') loadTariffs();
     else if (name === 'drivers') loadDrivers();
     else if (name === 'users') loadUsers();
+    else if (name === 'orders') loadOrders(0);
     else if (name === 'logs') loadLogs();
 }
 
@@ -641,17 +716,242 @@ async function activateDriver(id) {
     } catch (e) { showMsg('mainMsg', e.message || 'Xato', true); }
 }
 
-async function loadUsers() {
+var userSearchTimeout;
+function searchUsers(val) {
+    clearTimeout(userSearchTimeout);
+    userSearchTimeout = setTimeout(function() { loadUsers(val); }, 400);
+}
+
+async function loadUsers(search) {
     try {
-        const r = await fetch(API + '/users?limit=100', { headers: headers() });
+        var url = API + '/users?limit=100';
+        if (search && search.trim()) {
+            url += '&search=' + encodeURIComponent(search.trim());
+        } else {
+            var v = (document.getElementById('userSearch') || {}).value;
+            if (v && v.trim()) url += '&search=' + encodeURIComponent(v.trim());
+        }
+        const r = await fetch(url, { headers: headers() });
         if (r.status === 401) { logout(); return; }
         const list = await r.json();
-        let html = '<table><tr><th>ID</th><th>Telegram ID</th><th>Ism</th><th>Tel</th><th>Til</th><th>Role</th></tr>';
-        const langMap = { uz: 'O\'zbekcha', ru: 'Русский', uz_cyrl: 'Ўзбекча' };
-        for (const u of list) html += `<tr><td>${u.id}</td><td>${u.telegram_id}</td><td>${u.first_name||'-'}</td><td>${u.phone||'-'}</td><td>${langMap[u.language_code]||u.language_code||'-'}</td><td>${u.role}</td></tr>`;
+        let html = '<table><tr><th>ID</th><th>Telegram ID</th><th>Ism</th><th>Tel</th><th>Role</th></tr>';
+        for (const u of list) html += '<tr>' +
+            '<td>' + u.id + '</td>' +
+            '<td>' + (u.telegram_id != null ? u.telegram_id : '-') + '</td>' +
+            '<td>' + (u.first_name || '-') + '</td>' +
+            '<td>' + (u.phone || '-') + '</td>' +
+            '<td>' + (u.role || '-') + '</td>' +
+            '</tr>';
         html += '</table>';
         document.getElementById('usersList').innerHTML = html || '<p>Foydalanuvchilar yo\'q</p>';
     } catch (e) { document.getElementById('usersList').innerHTML = '<p>Xato: ' + e.message + '</p>'; }
+}
+
+// ==== Orders (Phase 1, read-only) ====
+var ordersState = { skip: 0, limit: 50, lastCount: 0 };
+
+function _ordFmt(v) { return (v == null) ? '—' : v; }
+function _ordFmtNum(v) {
+    if (v == null || isNaN(Number(v))) return '—';
+    try { return Number(v).toLocaleString(); } catch (_) { return String(v); }
+}
+function _ordFmtKm(v) {
+    if (v == null || isNaN(Number(v))) return '—';
+    return (Math.round(Number(v) * 10) / 10).toFixed(1);
+}
+function _ordFmtDate(v) {
+    if (!v) return '—';
+    try {
+        // Backend returns naive UTC (datetime.utcnow serialized without tz).
+        // Modern browsers parse "YYYY-MM-DDTHH:MM:SS" (no Z) as LOCAL time,
+        // which would mis-render by the browser's offset. Force UTC parsing
+        // by appending 'Z' when no explicit tz marker is present,
+        // then render in Uzbekistan local time (UTC+5, no DST).
+        var s = String(v);
+        if (s.indexOf('Z') === -1 && !/[+\-]\d{2}:?\d{2}$/.test(s)) {
+            s = s + 'Z';
+        }
+        var d = new Date(s);
+        if (isNaN(d.getTime())) return String(v);
+        var uz = new Date(d.getTime() + 5 * 3600 * 1000);
+        var pad = function(n) { return n < 10 ? '0' + n : '' + n; };
+        return pad(uz.getUTCDate()) + '.' + pad(uz.getUTCMonth() + 1) + '.' + uz.getUTCFullYear() + ' ' + pad(uz.getUTCHours()) + ':' + pad(uz.getUTCMinutes());
+    } catch (_) { return String(v); }
+}
+function _ordStatusBadge(s) {
+    var cls = 'badge';
+    if (s === 'completed') cls += ' green';
+    else if (s === 'cancelled') cls += ' red';
+    return '<span class="' + cls + '">' + (s || '-') + '</span>';
+}
+
+function _ordTodayStr() {
+    // "Today" from the Uzbekistan operator's perspective (UTC+5, no DST),
+    // regardless of the browser's own local timezone. This keeps the UI
+    // default and the backend default (which also assumes UZ local day)
+    // in agreement.
+    var nowUtcMs = Date.now();
+    var uz = new Date(nowUtcMs + 5 * 3600 * 1000);
+    var pad = function(n) { return n < 10 ? '0' + n : '' + n; };
+    return uz.getUTCFullYear() + '-' + pad(uz.getUTCMonth() + 1) + '-' + pad(uz.getUTCDate());
+}
+
+function resetOrdersFilters() {
+    var today = _ordTodayStr();
+    document.getElementById('ordersDateFrom').value = today;
+    document.getElementById('ordersDateTo').value = today;
+    document.getElementById('ordersStatus').value = '';
+    document.getElementById('ordersUserSearch').value = '';
+    document.getElementById('ordersDriverSearch').value = '';
+    loadOrders(0);
+}
+
+function _ordBuildQuery() {
+    var params = [];
+    var df = (document.getElementById('ordersDateFrom') || {}).value;
+    var dt = (document.getElementById('ordersDateTo') || {}).value;
+    var st = (document.getElementById('ordersStatus') || {}).value;
+    var us = (document.getElementById('ordersUserSearch') || {}).value;
+    var ds = (document.getElementById('ordersDriverSearch') || {}).value;
+    // Default date = today if neither is set (frontend hint; backend also defaults)
+    if (!df && !dt) {
+        var today = _ordTodayStr();
+        df = today; dt = today;
+        var fromEl = document.getElementById('ordersDateFrom');
+        var toEl = document.getElementById('ordersDateTo');
+        if (fromEl) fromEl.value = today;
+        if (toEl) toEl.value = today;
+    }
+    if (df) params.push('date_from=' + encodeURIComponent(df));
+    if (dt) params.push('date_to=' + encodeURIComponent(dt));
+    if (st && st.trim()) params.push('status=' + encodeURIComponent(st.trim()));
+    if (us && us.trim()) params.push('user_search=' + encodeURIComponent(us.trim()));
+    if (ds && ds.trim()) params.push('driver_search=' + encodeURIComponent(ds.trim()));
+    params.push('skip=' + ordersState.skip);
+    params.push('limit=' + ordersState.limit);
+    return params.join('&');
+}
+
+async function loadOrders(skipOverride) {
+    if (typeof skipOverride === 'number') ordersState.skip = skipOverride;
+    var qs = _ordBuildQuery();
+    var listEl = document.getElementById('ordersList');
+    if (listEl) listEl.innerHTML = '<p style="color:#94a3b8">Yuklanmoqda...</p>';
+    try {
+        const r = await fetch(API + '/orders?' + qs, { headers: headers() });
+        if (r.status === 401) { logout(); return; }
+        if (!r.ok) {
+            var err = await parseErrorResponse(r);
+            listEl.innerHTML = '<p style="color:#f87171">Xato: ' + err + '</p>';
+            return;
+        }
+        const list = await r.json();
+        ordersState.lastCount = Array.isArray(list) ? list.length : 0;
+        if (!list || list.length === 0) {
+            listEl.innerHTML = '<p style="color:#94a3b8">Buyurtma topilmadi</p>';
+        } else {
+            var html = '<table><tr>' +
+                '<th>ID</th><th>Sana</th><th>Status</th>' +
+                '<th>Mijoz</th><th>Haydovchi</th>' +
+                '<th>Km</th><th>Narx</th>' +
+                '<th>Ishlatilgan bonus</th><th>Cashback</th><th>Komissiya</th>' +
+                '<th></th></tr>';
+            for (var i = 0; i < list.length; i++) {
+                var o = list[i];
+                var userCell = (o.user_name || '-') + (o.user_phone ? '<br><small style="color:#94a3b8">' + o.user_phone + '</small>' : '');
+                var driverCell = o.driver_id
+                    ? ((o.driver_name || '#' + o.driver_id) + (o.driver_phone ? '<br><small style="color:#94a3b8">' + o.driver_phone + '</small>' : '') + (o.driver_car ? '<br><small style="color:#94a3b8">' + o.driver_car + '</small>' : ''))
+                    : '—';
+                html += '<tr style="cursor:pointer" onclick="openOrderModal(' + o.id + ')">' +
+                    '<td>' + o.id + '</td>' +
+                    '<td>' + _ordFmtDate(o.created_at) + '</td>' +
+                    '<td>' + _ordStatusBadge(o.status) + '</td>' +
+                    '<td>' + userCell + '</td>' +
+                    '<td>' + driverCell + '</td>' +
+                    '<td>' + _ordFmtKm(o.distance_km) + '</td>' +
+                    '<td>' + _ordFmtNum(o.final_price) + '</td>' +
+                    '<td>' + _ordFmtNum(o.used_bonus) + '</td>' +
+                    '<td>' + _ordFmtNum(o.earned_cashback) + '</td>' +
+                    '<td>' + _ordFmtNum(o.commission) + '</td>' +
+                    '<td><button onclick="event.stopPropagation(); openOrderModal(' + o.id + ')" style="padding:6px 10px;border-radius:8px;background:#334155;color:#e2e8f0;border:none;cursor:pointer;">📋</button></td>' +
+                    '</tr>';
+            }
+            html += '</table>';
+            listEl.innerHTML = html;
+        }
+        var info = document.getElementById('ordersPageInfo');
+        if (info) {
+            var start = ordersState.skip + 1;
+            var end = ordersState.skip + ordersState.lastCount;
+            info.textContent = ordersState.lastCount > 0 ? (start + '–' + end) : '0';
+        }
+        var prev = document.getElementById('ordersPrev');
+        var next = document.getElementById('ordersNext');
+        if (prev) prev.disabled = ordersState.skip <= 0;
+        if (next) next.disabled = ordersState.lastCount < ordersState.limit;
+    } catch (e) {
+        listEl.innerHTML = '<p style="color:#f87171">Xato: ' + e.message + '</p>';
+    }
+}
+
+function ordersPrev() {
+    var s = ordersState.skip - ordersState.limit;
+    if (s < 0) s = 0;
+    loadOrders(s);
+}
+function ordersNext() {
+    if (ordersState.lastCount < ordersState.limit) return;
+    loadOrders(ordersState.skip + ordersState.limit);
+}
+
+async function openOrderModal(orderId) {
+    document.getElementById('orderModal').style.display = 'flex';
+    document.getElementById('orderModalTitle').textContent = 'Buyurtma #' + orderId;
+    var content = document.getElementById('orderModalContent');
+    content.innerHTML = '<p style="color:#94a3b8">Yuklanmoqda...</p>';
+    try {
+        const r = await fetch(API + '/orders/' + orderId, { headers: headers() });
+        if (r.status === 401) { logout(); return; }
+        if (!r.ok) {
+            var err = await parseErrorResponse(r);
+            content.innerHTML = '<p style="color:#f87171">Xato: ' + err + '</p>';
+            return;
+        }
+        const o = await r.json();
+        var row = function(label, value) {
+            return '<div style="display:flex;justify-content:space-between;gap:12px;padding:6px 0;border-bottom:1px solid #334155;">' +
+                '<span style="color:#94a3b8">' + label + '</span>' +
+                '<span style="color:#e2e8f0;text-align:right;">' + value + '</span></div>';
+        };
+        var html = '<div style="display:grid;gap:2px;">' +
+            row('Status', _ordStatusBadge(o.status)) +
+            row('Yaratilgan', _ordFmtDate(o.created_at)) +
+            row('Qabul qilindi', _ordFmtDate(o.accepted_at)) +
+            row('Boshlandi', _ordFmtDate(o.started_at)) +
+            row('Tugadi', _ordFmtDate(o.completed_at)) +
+            row('Bekor qilindi', _ordFmtDate(o.cancelled_at)) +
+            row('Komissiya yechilgan', _ordFmtDate(o.commission_deducted_at)) +
+            row('Mijoz', (o.user_name || '-') + (o.user_phone ? ' (' + o.user_phone + ')' : '') + (o.user_id ? ' #' + o.user_id : '')) +
+            row('Haydovchi', o.driver_id ? ((o.driver_name || ('#' + o.driver_id)) + (o.driver_phone ? ' (' + o.driver_phone + ')' : '') + (o.driver_car ? ' — ' + o.driver_car : '')) : '—') +
+            row('Masofa (km)', _ordFmtKm(o.distance_km)) +
+            row('Hisob-kitob narxi', _ordFmtNum(o.estimated_price)) +
+            row('Yakuniy narx', _ordFmtNum(o.final_price)) +
+            row('Ishlatilgan bonus', _ordFmtNum(o.used_bonus)) +
+            row('Muzlatilgan bonus', _ordFmtNum(o.frozen_bonus)) +
+            row('Cashback (topilgan)', _ordFmtNum(o.earned_cashback)) +
+            row('Komissiya (so\'m)', _ordFmtNum(o.commission)) +
+            row('Bonus so\'ralgan', (o.is_bonus_requested === true ? 'Ha' : (o.is_bonus_requested === false ? 'Yo\'q' : '—'))) +
+            row('Olib ketish manzili', _ordFmt(o.pickup_address)) +
+            row('Manzil', _ordFmt(o.destination_address)) +
+            '</div>';
+        content.innerHTML = html;
+    } catch (e) {
+        content.innerHTML = '<p style="color:#f87171">Xato: ' + e.message + '</p>';
+    }
+}
+
+function closeOrderModal() {
+    document.getElementById('orderModal').style.display = 'none';
 }
 
 async function loadLogs() {
