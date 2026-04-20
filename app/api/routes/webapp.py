@@ -706,9 +706,28 @@ async def trip_meter(
     est = compute_fare(snap, float(st.get("distance_km") or 0), ws_effective)
     _raw_surge = float(snap.get("surge_multiplier") or 1.0)
     _surge_out = max(1.0, min(2.0, _raw_surge))
+    _dist_out = float(st.get("distance_km") or 0)
+    _min_p = float(snap.get("base", 0) or 0)
+    _km_p = float(snap.get("km", 0) or 0)
+    _wait_p = float(snap.get("wait", 0) or 0)
+    logger.info(
+        "[TRIP_METER_DEBUG] order_id=%s active=%s distance_km=%s waiting_seconds_stored=%s "
+        "waiting_seconds_effective=%s min_price=%s price_per_km=%s price_per_min_waiting=%s "
+        "surge_multiplier=%s estimated_fare=%s",
+        order_id,
+        True,
+        _dist_out,
+        ws_stored,
+        ws_effective,
+        _min_p,
+        _km_p,
+        _wait_p,
+        _surge_out,
+        int(est),
+    )
     return {
         "active": True,
-        "distance_km": float(st.get("distance_km") or 0),
+        "distance_km": _dist_out,
         "waiting_seconds": ws_effective,
         "estimated_fare": int(est),
         "is_waiting": bool(st.get("is_waiting")),

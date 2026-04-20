@@ -109,8 +109,17 @@ function getTripOrderIdForApi() {
 }
 
 function applyTripMeterPayload(data) {
+    console.log("[TRIP_METER_APPLY_BEFORE]", JSON.parse(JSON.stringify(tripData)));
+    console.log("[TRIP_METER_PAYLOAD]", data);
     if (data != null) console.log("trip-meter active:", data.active);
-    if (!data || !data.active) return;
+    if (!data || !data.active) {
+        try {
+            console.log("[TRIP_METER_APPLY_AFTER]", JSON.parse(JSON.stringify(tripData)));
+        } catch (_e) {
+            console.log("[TRIP_METER_APPLY_AFTER]", tripData);
+        }
+        return;
+    }
     if (data.distance_km != null) tripData.distance = data.distance_km;
     if (!tripData.isWaiting) {
         if (data.waiting_seconds != null) tripData.waitingTime = data.waiting_seconds;
@@ -122,6 +131,11 @@ function applyTripMeterPayload(data) {
     if (data.estimated_fare != null) tripData.serverFare = data.estimated_fare;
     if (data.elapsed_seconds != null && !isNaN(Number(data.elapsed_seconds))) {
         tripData.elapsedSeconds = Number(data.elapsed_seconds) || 0;
+    }
+    try {
+        console.log("[TRIP_METER_APPLY_AFTER]", JSON.parse(JSON.stringify(tripData)));
+    } catch (_e2) {
+        console.log("[TRIP_METER_APPLY_AFTER]", tripData);
     }
     updateTaximeter();
 }
@@ -138,6 +152,7 @@ function fetchTripMeterSnapshot() {
             return r.json();
         })
         .then(function(data) {
+            if (data != null) console.log("[TRIP_METER_FETCH]", data);
             if (data) applyTripMeterPayload(data);
         })
         .catch(function() {});
@@ -2296,6 +2311,12 @@ function updateTaximeter() {
         console.warn("Tariff load error, but showing server fare");
     }
     var sf = tripData.serverFare;
+    console.log("[TRIP_METER_RENDER]", {
+        serverFare: tripData.serverFare,
+        distance: tripData.distance,
+        waitingTime: tripData.waitingTime,
+        isWaiting: tripData.isWaiting
+    });
     if (sf != null && !isNaN(Number(sf))) {
         curFareEl.textContent = Math.round(Number(sf)).toLocaleString('en-US');
         return;
