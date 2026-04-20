@@ -1634,26 +1634,12 @@ function updateDriverMarker(lat, lng, heading) {
                 if (timeEl) timeEl.textContent = d > MAX_DISTANCE_KM ? '??' : '~' + Math.max(1, Math.round(d / AVG_SPEED_KMH * 60));
             }
         }
+        // Trip o'lchovi (taximeter) masofasi: faqat server /trip-meter dan (tripData.distance).
+        // Mahalliy segment qo'shish olib tashlangan — aks holda client sum > Redis sum bo'lib,
+        // keyingi poll display ni orqaga sakratardi (masalan 7 -> 3).
         if (appState === 'trip' && !tripData.isWaiting) {
-            if (tripData.lastPosition) {
-                var segD = haversineM(
-                    driverPos.lat, driverPos.lng,
-                    tripData.lastPosition.lat, tripData.lastPosition.lng
-                ) / 1000;
-                // MICRO NOISE FILTER
-                if (segD < 0.005) {
-                } else {
-                    // MAIN ACCUMULATION
-                    if (segD > 0.007 && segD < 1) {
-                        tripData.distance += segD;
-                        tripData.lastPosition = driverPos;
-                        updateTaximeter();
-                        maybeSyncToServer();
-                    }
-                }
-            } else {
-                tripData.lastPosition = driverPos;
-            }
+            tripData.lastPosition = driverPos;
+            maybeSyncToServer();
         }
         checkOffRoute(lat, lng, speedKmh);
     } catch (e) {}
