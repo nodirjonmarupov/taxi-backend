@@ -33,12 +33,16 @@ class _TripMeterAccessLogFilter(logging.Filter):
 
     def filter(self, record: logging.LogRecord) -> bool:
         try:
-            msg = record.getMessage()
+            args = record.args
+            # Uvicorn access log args are typically:
+            # (client_addr, method, path, http_version, status_code)
+            if isinstance(args, tuple) and len(args) >= 5:
+                path = str(args[2])
+                status = args[-1]
+                if "/trip-meter" in path and int(status) == 200:
+                    return False
         except Exception:
-            return True
-        # Keep non-trip-meter access logs, keep non-200 logs for trip-meter.
-        if "/trip-meter" in msg and " 200 " in msg:
-            return False
+            pass
         return True
 
 
