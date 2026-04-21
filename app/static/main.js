@@ -354,6 +354,7 @@ let CLIENT_LOCATION = null;
 let lastDriverLocation = null;
 let headingBuffer = [];
 let lastHeading = 0;
+let _needsTripRouteRestore = false;
 let lastSentLocation = null;
 let lastSentTime = 0;
 const MIN_DISTANCE_M = 15;
@@ -632,6 +633,7 @@ function renderLoop() {
         displayBearing = (displayBearing + _brgShortcut * (1 - _brgDecay) + 360) % 360;
 
         // SINGLE SOURCE BEARING (route-based)
+        var _routeBearingApplied = false;
         if (typeof turf !== 'undefined' &&
             _driverRouteCoords &&
             _driverRouteCoords.length > 1 &&
@@ -653,7 +655,12 @@ function renderLoop() {
                 }
 
                 brg = _routeBrg;
+                _routeBearingApplied = true;
             }
+        }
+        // Fallback: if route bearing is not available, use GPS heading (if valid)
+        if (!_routeBearingApplied && lastHeading != null && !isNaN(lastHeading)) {
+            brg = (Number(lastHeading) + 360) % 360;
         }
 
         // Arrow heading: adaptive tau to reduce low-speed jitter.
@@ -1022,6 +1029,7 @@ async function init() {
     /* Trip already started */
     if (ORDER_DATA.status === 'in_progress') {
         appState = 'trip';
+        _needsTripRouteRestore = true;
         activateTaximeterUI();
         enableWakeLock(); // may fail silently, OK
 
@@ -1440,6 +1448,10 @@ function updateDriverMarker(lat, lng, heading) {
     try {
         if (!map || !ORDER_DATA) return;
         if (!isValidCoord(lat, lng)) return;
+        // Cache GPS heading for rotation fallback when route bearing isn't available.
+        if (heading != null && !isNaN(Number(heading))) {
+            lastHeading = (Number(heading) + 360) % 360;
+        }
         // Route not loaded yet AND marker already created ??queue and wait.
         // The first call (driverMarker is undefined/falsy) must fall through so
         // it can call addDriverMarker() and drawRoute(), which triggers the OSRM
@@ -1621,6 +1633,12 @@ function updateDriverMarker(lat, lng, heading) {
             var pickLat = ORDER_DATA.pickup_latitude;
             var pickLon = ORDER_DATA.pickup_longitude;
             if (pickLat != null && pickLon != null) drawRoute(driverPos, { lat: pickLat, lng: pickLon });
+            // Trip restore: ensure destination route is drawn (same logic as handleStartTrip).
+            if (_needsTripRouteRestore && appState === 'trip' &&
+                ORDER_DATA.destination_latitude != null && ORDER_DATA.destination_longitude != null) {
+                drawRoute(driverPos, { lat: ORDER_DATA.destination_latitude, lng: ORDER_DATA.destination_longitude });
+                _needsTripRouteRestore = false;
+            }
             document.getElementById('loading').classList.add('hidden');
         } else {
             var _brgPreBuf = brg;
