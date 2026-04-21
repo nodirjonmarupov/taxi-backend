@@ -3,6 +3,7 @@ Main FastAPI Application - Timgo Taxi Backend
 Professional Real-time Taximeter with GPS Tracking
 """
 import asyncio
+import logging
 from contextlib import asynccontextmanager
 from datetime import datetime
 import json
@@ -26,6 +27,19 @@ from app.core.redis import close_redis
 from app.core.logger import get_logger
 
 logger = get_logger(__name__)
+
+class _TripMeterAccessLogFilter(logging.Filter):
+    """Drop high-frequency 200 OK access logs for /trip-meter in production."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        try:
+            msg = record.getMessage()
+        except Exception:
+            return True
+        # Keep non-trip-meter access logs, keep non-200 logs for trip-meter.
+        if "/trip-meter" in msg and " 200 " in msg:
+            return False
+        return True
 
 
 # ============================================
@@ -349,6 +363,12 @@ USER_TRACKING_HTML = """
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator:
+    # Production noise control: /trip-meter is polled every 2–3s; suppress 200 OK access logs only.
+    if not bool(getattr(settings, "DEBUG", False)):
+        _uv_acc = logging.getLogger("uvicorn.access")
+        if not getattr(_uv_acc, "_trip_meter_filter_installed", False):
+            _uv_acc.addFilter(_TripMeterAccessLogFilter())
+            setattr(_uv_acc, "_trip_meter_filter_installed", True)
     # Security: default-secret ishlatilsa, tokenlarni hisoblab/forge qilish xavfi ortadi.
     if (getattr(settings, "SECRET_KEY", None) or "").strip() == "default-secret":
         logger.warning("⚠️ WARNING: SECRET_KEY is default! Change it for production!")

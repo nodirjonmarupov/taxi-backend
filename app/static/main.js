@@ -73,6 +73,15 @@ const TSVG = {
 };
 let appState = 'arriving';
 let tripData = { distance: 0, waitingTime: 0, elapsedSeconds: 0, isWaiting: false, lastPosition: null, serverFare: null, surge: 1 };
+// UI-only: smooth fare display (serverFare remains source of truth)
+let _fareUI = {
+    displayed: null,
+    target: null,
+    from: null,
+    startTs: 0,
+    durMs: 1100,
+    raf: null
+};
 let _resumeInFlight = false;
 let intervals = { timer: null, position: null, tripMeterPoll: null };
 
@@ -2296,17 +2305,82 @@ function updateTaximeter() {
         console.warn("Tariff load error, but showing server fare");
     }
     var sf = tripData.serverFare;
-    console.log("[TRIP_METER_RENDER]", {
-        serverFare: tripData.serverFare,
-        distance: tripData.distance,
-        waitingTime: tripData.waitingTime,
-        isWaiting: tripData.isWaiting
-    });
-    if (sf != null && !isNaN(Number(sf))) {
-        curFareEl.textContent = Math.round(Number(sf)).toLocaleString('en-US');
+    if (window.DEBUG) {
+        console.log("[TRIP_METER_RENDER]", {
+            serverFare: tripData.serverFare,
+            distance: tripData.distance,
+            waitingTime: tripData.waitingTime,
+            isWaiting: tripData.isWaiting
+        });
+    }
+    // Waiting visual feedback (UI only)
+    try {
+        var wbtn = document.getElementById('waitingBtn');
+        if (wbtn) {
+            wbtn.style.transition = 'opacity 200ms ease';
+            if (tripData.isWaiting) {
+                // Blink subtly once per second (driven by updateTimer)
+                wbtn.style.opacity = (Math.floor(Date.now() / 500) % 2 === 0) ? '1' : '0.65';
+            } else {
+                wbtn.style.opacity = '1';
+            }
+        }
+        curFareEl.style.transition = 'color 200ms ease';
+        curFareEl.style.color = tripData.isWaiting ? '#f59e0b' : '';
+    } catch (_) {}
+
+    // Smooth fare display (visual only). Never compute fare locally.
+    var nextTarget = (sf != null && !isNaN(Number(sf))) ? Math.round(Number(sf)) : null;
+    if (nextTarget != null) {
+        if (_fareUI.target == null) {
+            _fareUI.displayed = nextTarget;
+            _fareUI.target = nextTarget;
+        } else if (_fareUI.target !== nextTarget) {
+            if (_fareUI.raf != null) { cancelAnimationFrame(_fareUI.raf); _fareUI.raf = null; }
+            _fareUI.from = (_fareUI.displayed != null ? _fareUI.displayed : _fareUI.target);
+            _fareUI.target = nextTarget;
+            _fareUI.startTs = 0;
+        }
+    }
+
+    // Failsafe: if serverFare missing, keep previous displayed value (do not reset UI).
+    if (_fareUI.displayed == null && _fareUI.target == null) {
         return;
     }
-    curFareEl.textContent = '…';
+
+    function _renderFare(n) {
+        curFareEl.textContent = Math.round(Number(n)).toLocaleString('en-US');
+    }
+
+    function _tick(ts) {
+        if (_fareUI.startTs === 0) _fareUI.startTs = ts;
+        var fromV = (_fareUI.from != null ? _fareUI.from : (_fareUI.displayed != null ? _fareUI.displayed : _fareUI.target));
+        var toV = (_fareUI.target != null ? _fareUI.target : fromV);
+        var t = (ts - _fareUI.startTs) / (_fareUI.durMs || 1);
+        if (t >= 1) {
+            _fareUI.displayed = toV;
+            _fareUI.from = null;
+            _fareUI.startTs = 0;
+            _renderFare(_fareUI.displayed);
+            _fareUI.raf = null;
+            return;
+        }
+        // Ease-out cubic for smooth finish
+        var p = 1 - Math.pow(1 - Math.max(0, Math.min(1, t)), 3);
+        _fareUI.displayed = fromV + (toV - fromV) * p;
+        _renderFare(_fareUI.displayed);
+        _fareUI.raf = requestAnimationFrame(_tick);
+    }
+
+    // If no animation in progress, render once; else keep animating.
+    if (_fareUI.target != null && (_fareUI.from != null || _fareUI.displayed !== _fareUI.target)) {
+        if (_fareUI.raf != null) { cancelAnimationFrame(_fareUI.raf); _fareUI.raf = null; }
+        _fareUI.raf = requestAnimationFrame(_tick);
+        return;
+    }
+
+    _fareUI.displayed = (_fareUI.target != null ? _fareUI.target : _fareUI.displayed);
+    _renderFare(_fareUI.displayed);
 }
 
 window.addEventListener('online', async () => {

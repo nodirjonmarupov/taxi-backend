@@ -941,7 +941,7 @@ async def update_location(message: Message, lang: str = "uz"):
             await accumulate_order_distance_for_driver(db, driver.id, lat, lon)
             await db.commit()
 
-            logger.info(f"📍 Driver {driver.id} lokatsiya yangilandi: {lat:.6f}, {lon:.6f}")
+            logger.debug(f"📍 Driver {driver.id} lokatsiya yangilandi: {lat:.6f}, {lon:.6f}")
             
             await message.answer(get_text(lang, "driver_location_ok"), parse_mode="HTML")
             
@@ -1013,7 +1013,7 @@ async def live_location_update(message: Message):
                     return
                 await accumulate_order_distance_for_driver(db, driver.id, lat, lon)
                 await db.commit()
-                logger.info(
+                logger.debug(
                     f"📍 Driver {driver.id} safar live location: {lat:.6f}, {lon:.6f}"
                 )
                 return
@@ -1051,7 +1051,7 @@ async def live_location_update(message: Message):
                 {"driver_id": driver.id, "lat": lat, "lon": lon}
             )
             await db.commit()
-            logger.info(
+            logger.debug(
                 f"📍 Driver {driver.id} live location: "
                 f"{lat:.6f}, {lon:.6f}"
             )
