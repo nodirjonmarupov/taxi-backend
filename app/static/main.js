@@ -497,8 +497,11 @@ function addDriverMarker(lat, lon) {
         pitchAlignment: 'viewport'
     }).setLngLat([lon, lat]).addTo(map);
 }
+
+function _temporarilyDisableFollow(ms) {
+    _camBlockUntil = Date.now() + (ms || 5000);
+}
 function recenter() {
-    locked = true;
     _camBlockUntil = Date.now() + 380;
     if (dLat != null && dLng != null && map) {
         var zoom = speedToZoom(spd);
@@ -768,6 +771,9 @@ function renderLoop() {
         // Larger ratio = vehicle lower on screen = more road visible ahead.
         // GPU redraw suppressed when position and bearing are sub-pixel stable.
         if (dLat !== null) {
+            if (Date.now() < _camBlockUntil) {
+                return;
+            }
             // Smooth zoom via EMA (alpha=0.02/frame) to prevent flicker at speed-band boundaries.
             var _zoomTarget = speedToZoom(spd);
             if (_stableZoom === null) { _stableZoom = _zoomTarget; }
@@ -778,14 +784,14 @@ function renderLoop() {
                 ? haversineM(dLat, dLng, _lastCamLat, _lastCamLng) : 999;
             var _moved = _moveDist > 1;
             var _zoomDelta = Math.abs(_zoom - _lastCamZoom);
-            if ((_nowMs - _lastCamUpdate > 100) &&
+            if ((_nowMs - _lastCamUpdate > 130) &&
                 (_moved || _brgDelta > 2 || _zoomDelta > 0.1)) {
                 map.easeTo({
                     center: [dLng, dLat],
                     bearing: displayBearing,
                     pitch: 60,
                     zoom: _zoom,
-                    duration: 80,
+                    duration: 650,
                     easing: function(t){ return t * (2 - t); }
                 });
 
@@ -1101,7 +1107,10 @@ function initMap() {
         return;
     }
 
-    map.on('dragstart', function() { locked = false; });
+    map.on('dragstart', function() { _temporarilyDisableFollow(5000); });
+    map.on('zoomstart', function() { _temporarilyDisableFollow(5000); });
+    map.on('rotatestart', function() { _temporarilyDisableFollow(5000); });
+    map.on('pitchstart', function() { _temporarilyDisableFollow(5000); });
     map.on('error', function() {
         var leErr = document.getElementById('loading');
         if (leErr) leErr.classList.add('hidden');
@@ -1153,13 +1162,11 @@ function setupMapGestures() {
         compassBtn.style.display = 'flex';
         compassBtn.addEventListener('click', function() {
             northUpMode = !northUpMode;
-            locked = !northUpMode;
             if (northUpMode) {
                 targetBearing = 0;
                 compassBtn.style.background = '#1A73E8';
                 if (compassBtn.querySelector('svg')) compassBtn.querySelector('svg').style.filter = 'invert(1)';
             } else {
-                locked = true;
                 compassBtn.style.background = 'white';
                 if (compassBtn.querySelector('svg')) compassBtn.querySelector('svg').style.filter = 'none';
             }
@@ -1170,7 +1177,6 @@ function setupMapGestures() {
             if (e.touches.length === 2) {
                 isManualMode = true;
                 useManualBearing = true;
-                locked = false;
                 gestureStartAngle = getAngleFromTouches(e.touches);
                 gestureStartBearing = displayBearing;
                 clearTimeout(manualModeTimer);
@@ -1190,7 +1196,6 @@ function setupMapGestures() {
                 isManualMode = false;
                 manualModeTimer = setTimeout(function() {
                     useManualBearing = false;
-                    locked = true;
                 }, 5000);
             }
         });
