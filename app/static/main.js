@@ -45,7 +45,6 @@ let _displayArrowBrg = null;
 let _lastStableLat = null;
 let _lastStableLng = null;
 let _pendingGps = null;    // queued GPS update received before _driverRouteLine was ready
-let _firstSnapDone = false; // true after the first successful Turf snap; guards dead zone
 let _snapRouteLine = null;  // trimmed forward-only snap line; rebuilt after each snap
 let _offRouteCount = 0;       // consecutive GPS samples past off-route threshold (noise filter)
 let _lastRerouteTime = 0;     // last reroute attempt timestamp (cooldown)
@@ -56,10 +55,9 @@ let _lastProgressLng = null;
 let _lastProgressAnchorIdx = null;
 let _lastDbgLat = null;
 let _lastDbgLng = null;
-let _lastDisplayUpdate = 0;
-let _prevSpdForDisplay = 0;
 let _dispLat = null;
 let _dispLng = null;
+let _debugSnapCompareCounter = 0;
 let _dispArrowDeg = null;
 let _wakeLock = null;
 let northUpMode = false;
@@ -359,9 +357,6 @@ let lastSentLocation = null;
 let lastSentTime = 0;
 const MIN_DISTANCE_M = 15;
 const ROUTE_SNAP_MAX_M = 20;
-const RAW_GPS_MIN_MOVE_M = 5;
-const RAW_GPS_REF_FREEZE_MAX_KMH = 6;
-const RAW_GPS_HOLD_MAX_KMH = 12;
 const HEADING_BUFFER_MAX = 8;
 const HEADING_BUFFER_RESET_DEG = 30;
 const PREDICT_AHEAD_MIN_S = 0.3;
@@ -635,6 +630,7 @@ function renderLoop() {
         // SINGLE SOURCE BEARING (route-based)
         var _routeBearingApplied = false;
         if (typeof turf !== 'undefined' &&
+            _driverRouteLine && _driverRouteLine.geometry &&
             _driverRouteCoords &&
             _driverRouteCoords.length > 1 &&
             typeof _routeAnchorIdx === 'number' &&
@@ -646,19 +642,10 @@ function renderLoop() {
 
             if (_curr && _next) {
                 var _routeBrg = turf.bearing(turf.point(_curr), turf.point(_next));
-                _routeBrg = (_routeBrg + 360) % 360;
-
-                // optional GPS assist at high speed
-                if (lastHeading != null && spd > 15) {
-                    var _diff = Math.abs(((_routeBrg - lastHeading + 540) % 360) - 180);
-                    if (_diff < 20) _routeBrg = lastHeading;
-                }
-
-                brg = _routeBrg;
+                brg = (_routeBrg + 360) % 360;
                 _routeBearingApplied = true;
             }
         }
-        // Fallback: if route bearing is not available, use GPS heading (if valid)
         if (!_routeBearingApplied && lastHeading != null && !isNaN(lastHeading)) {
             brg = (Number(lastHeading) + 360) % 360;
         }
@@ -679,20 +666,6 @@ function renderLoop() {
         _lastDbgLat = dLat;
         _lastDbgLng = dLng;
 
-        var interval;
-        if (spd < 1.5) {
-            interval = 999999;
-        } else if (spd < 10) {
-            interval = 150;
-        } else {
-            interval = 80;
-        }
-        var forceDisplay = false;
-        if (_prevSpdForDisplay < 1.5 && spd >= 2.5) {
-            forceDisplay = true;
-        }
-        _prevSpdForDisplay = spd;
-
         // _displayArrowBrg: displayBearing ni strelka uchun alohida smooth kuzatadi.
         // tau=0.06s — displayBearing (tau ~0.15-0.80s) dan tezroq,
         // shuning uchun kamera aylanayotganda strelka unga yopishib qoladi.
@@ -701,36 +674,22 @@ function renderLoop() {
         _displayArrowBrg = (_displayArrowBrg + _arrowBrgShortcut * (1 - Math.exp(-dt / 0.06)) + 360) % 360;
 
         if (driverMarker && dLat !== null && dLng !== null) {
-            if (forceDisplay || (_nowMs - _lastDisplayUpdate > interval)) {
-                if (_dispLat === null || _dispLng === null) {
-                    _dispLat = dLat;
-                    _dispLng = dLng;
-                }
+            if (_dispLat === null || _dispLng === null) {
+                _dispLat = dLat;
+                _dispLng = dLng;
+            }
+            _dispLat += (dLat - _dispLat) * 0.2;
+            _dispLng += (dLng - _dispLng) * 0.2;
+            driverMarker.setLngLat([_dispLng, _dispLat]);
 
-                var alpha = (spd < 5) ? 0.15 : 0.25;
-
-                _dispLat += (dLat - _dispLat) * alpha;
-                _dispLng += (dLng - _dispLng) * alpha;
-
-                driverMarker.setLngLat([_dispLng, _dispLat]);
-
-                var _targetDeg = (displayHeading - _displayArrowBrg + 720) % 360;
-
-                if (_dispArrowDeg === null) {
-                    _dispArrowDeg = _targetDeg;
-                }
-
-                var delta = ((_targetDeg - _dispArrowDeg + 540) % 360) - 180;
-
-                var alphaRot = (spd < 5) ? 0.15 : 0.25;
-
-                _dispArrowDeg += delta * alphaRot;
-
-                if (arrowEl) {
-                    arrowEl.style.transform = 'rotate(' + _dispArrowDeg + 'deg)';
-                }
-
-                _lastDisplayUpdate = _nowMs;
+            var _targetDeg = (displayHeading - _displayArrowBrg + 720) % 360;
+            if (_dispArrowDeg === null) {
+                _dispArrowDeg = _targetDeg;
+            }
+            var delta = ((_targetDeg - _dispArrowDeg + 540) % 360) - 180;
+            _dispArrowDeg += delta * 0.2;
+            if (arrowEl) {
+                arrowEl.style.transform = 'rotate(' + _dispArrowDeg + 'deg)';
             }
             // Adaptive intervals: slower when parked (stability), faster when moving (responsiveness).
             var _snapInterval = spd < 5 ? 150 : 80;
@@ -1464,69 +1423,56 @@ function updateDriverMarker(lat, lng, heading) {
             _pendingGps = { lat: lat, lng: lng, heading: heading };
             return;
         }
+        var _prevTrimLineForDbg = _snapRouteLine;
         var _prevSnappedLat = tLat, _prevSnappedLng = tLng;
         var sl = lat, sa = lng;
-        var _speedForFreeze = (lastGpsSpeedKmh != null && !isNaN(lastGpsSpeedKmh) && lastGpsSpeedKmh > 0)
-            ? lastGpsSpeedKmh : spd;
-        var _microMove = lastDriverLocation && lastDriverLocation.lat != null && lastDriverLocation.lon != null &&
-            haversineM(lat, lng, lastDriverLocation.lat, lastDriverLocation.lon) < RAW_GPS_MIN_MOVE_M;
-        var _freezeGpsRef = _microMove && _speedForFreeze < RAW_GPS_REF_FREEZE_MAX_KMH &&
-            tLat != null && tLng != null && driverMarker;
-        if (_freezeGpsRef) {
-            sl = tLat;
-            sa = tLng;
-        } else if (typeof turf !== 'undefined' && _driverRouteLine && _driverRouteLine.geometry) {
+        if (typeof turf !== 'undefined' && _driverRouteLine && _driverRouteLine.geometry) {
             try {
                 var _snapPt = turf.point([lng, lat]);
-                var _lineDistM = turf.pointToLineDistance(_snapPt, _driverRouteLine, { units: 'meters' });
-                var _snapRes = turf.nearestPointOnLine(_snapRouteLine || _driverRouteLine, _snapPt, { units: 'kilometers' });
-                var _slNew = lat, _saNew = lng;
+                var _snapRes = turf.nearestPointOnLine(_driverRouteLine, _snapPt, { units: 'kilometers' });
                 if (_snapRes && _snapRes.geometry && _snapRes.geometry.coordinates) {
-                    _saNew = _snapRes.geometry.coordinates[0];
-                    _slNew = _snapRes.geometry.coordinates[1];
-                }
-                var _offRouteSnap = _lineDistM > ROUTE_SNAP_MAX_M;
-                var _holdM = RAW_GPS_MIN_MOVE_M;
-                if (_speedForFreeze >= 6) _holdM = 3;
-                if (_speedForFreeze >= 12) _holdM = 2;
-                var _onRouteHold = !_offRouteSnap && _prevSnappedLat != null && _prevSnappedLng != null &&
-                    haversineM(_slNew, _saNew, _prevSnappedLat, _prevSnappedLng) < _holdM &&
-                    _speedForFreeze < RAW_GPS_HOLD_MAX_KMH;
-                if (_onRouteHold) {
-                    sl = _prevSnappedLat;
-                    sa = _prevSnappedLng;
-                } else if (_snapRes && _snapRes.geometry && _snapRes.geometry.coordinates) {
-                    sa = _saNew;
-                    sl = _slNew;
-                    // Turf returns the exact segment index ??use it directly.
-                    // The old vertex-search loop found the nearest START node which is wrong
-                    // when the projection point is near a segment's end (off-by-one ??wrong DR).
+                    sa = _snapRes.geometry.coordinates[0];
+                    sl = _snapRes.geometry.coordinates[1];
+                    // #region agent log
+                    try {
+                        _debugSnapCompareCounter++;
+                        if (_debugSnapCompareCounter % 25 === 0) {
+                            var _ptrim = _prevTrimLineForDbg;
+                            var _divergeM = null;
+                            if (_ptrim && _ptrim.geometry && _ptrim !== _driverRouteLine) {
+                                var _tn = turf.nearestPointOnLine(_ptrim, _snapPt, { units: 'kilometers' });
+                                if (_tn && _tn.geometry && _tn.geometry.coordinates) {
+                                    _divergeM = haversineM(sl, sa, _tn.geometry.coordinates[1], _tn.geometry.coordinates[0]);
+                                }
+                            }
+                            fetch('http://127.0.0.1:7602/ingest/b6487788-bee6-445f-81f9-95a1b43ce854',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'4d6510'},body:JSON.stringify({sessionId:'4d6510',location:'main.js:updateDriverMarker',message:'fullLineVsPrevTrimSnap',data:{divergeM:_divergeM,anchorBefore:_routeAnchorIdx,fullSnapIdx:_snapRes.properties&&_snapRes.properties.index!=null?_snapRes.properties.index:null,trimWasSameRef:_ptrim===_driverRouteLine},timestamp:Date.now(),hypothesisId:'H1'})}).catch(function(){});
+                        }
+                        if ((!_snapRes.properties || _snapRes.properties.index == null) && _debugSnapCompareCounter % 30 === 0) {
+                            fetch('http://127.0.0.1:7602/ingest/b6487788-bee6-445f-81f9-95a1b43ce854',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'4d6510'},body:JSON.stringify({sessionId:'4d6510',location:'main.js:updateDriverMarker',message:'snapMissingRouteIndex',data:{},timestamp:Date.now(),hypothesisId:'H3'})}).catch(function(){});
+                        }
+                    } catch (_lg) {}
+                    // #endregion
                     if (_snapRes.properties && _snapRes.properties.index != null) {
                         var _maxIdx = _driverRouteCoords.length > 1 ? _driverRouteCoords.length - 2 : 0;
                         var _newIdx = Math.min(_snapRes.properties.index, _maxIdx);
                         if (typeof _routeAnchorIdx === 'number' && !isNaN(_routeAnchorIdx) && _newIdx < _routeAnchorIdx) {
                             var diff = _routeAnchorIdx - _newIdx;
-
-                            // Allow real backward jump if it's large (actual turn)
                             if (diff < 2) {
                                 _newIdx = _routeAnchorIdx;
                             }
                         }
-
                         _routeAnchorIdx = _newIdx;
                         console.log('[ANCHOR UPDATE]', _routeAnchorIdx);
-                        // Rebuild trimmed snap line: snapped point + all vertices ahead.
-                        // Starting from the exact snapped coordinate (not segment start vertex)
-                        // ensures the next snap cannot project backward even by one segment.
                         var _trimCoords = [[sa, sl]].concat(_driverRouteCoords.slice(_routeAnchorIdx + 1));
                         if (_trimCoords.length >= 2) {
                             try { _snapRouteLine = turf.lineString(_trimCoords); } catch (_) {}
+                            // #region agent log
+                            if (_debugSnapCompareCounter % 27 === 0) {
+                                fetch('http://127.0.0.1:7602/ingest/b6487788-bee6-445f-81f9-95a1b43ce854',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'4d6510'},body:JSON.stringify({sessionId:'4d6510',location:'main.js:updateDriverMarker',message:'trimLineShape',data:{trimVertexCount:_trimCoords.length,driverVertexCount:_driverRouteCoords.length,anchor:_routeAnchorIdx},timestamp:Date.now(),hypothesisId:'H2'})}).catch(function(){});
+                            }
+                            // #endregion
                         }
                     }
-                    _firstSnapDone = true;
-                } else {
-                    sl = _slNew;
-                    sa = _saNew;
                 }
             } catch (_e) {
                 if (routeCoordinates && routeCoordinates.length >= 2) {
@@ -1540,18 +1486,6 @@ function updateDriverMarker(lat, lng, heading) {
             sl = _fb2[0]; sa = _fb2[1]; _routeAnchorIdx = _fb2[2];
             console.log('[ANCHOR UPDATE]', _routeAnchorIdx);
         }
-        // Adaptive dead zone: tezlikka qarab (2m..7m) GPS noise filtri
-        // Bypassed on the first snap so a raw-GPS anchor can never be frozen onto
-        // the route line ??prevTLat/Lng is guaranteed clean (on-route) from here on.
-        var prevTLat = tLat, prevTLng = tLng;
-        if (_firstSnapDone && prevTLat != null && prevTLng != null) {
-            var snapMoveDist = haversineM(sl, sa, prevTLat, prevTLng);
-            var _dzThresh = Math.max(2.0, Math.min(spd * 0.15, 7.0));
-            if (snapMoveDist < _dzThresh) {
-                sl = prevTLat;
-                sa = prevTLng;
-            }
-        }
         var driverPos = { lat: sl, lng: sa };
         var now = Date.now();
         var speedKmh = 0;
@@ -1562,9 +1496,7 @@ function updateDriverMarker(lat, lng, heading) {
         }
         if (lastGpsSpeedKmh != null && !isNaN(lastGpsSpeedKmh) && lastGpsSpeedKmh > 0) speedKmh = lastGpsSpeedKmh;
         lastPositionTime = now;
-        if (!_freezeGpsRef) {
-            lastDriverLocation = { lat: lat, lon: lng };
-        }
+        lastDriverLocation = { lat: lat, lon: lng };
         pLat = lat;
         pLng = lng;
         tLat = sl;
@@ -1595,27 +1527,6 @@ function updateDriverMarker(lat, lng, heading) {
         _gpsAnchorLng = sa;
         _gpsAnchorMs = now;
         updateProgressiveRoute(sa, sl);
-        // Bearing: smooth blend between route-tangent (low speed) and coordinate
-        // (high speed + sufficient movement). Replaces the hard 8 km/h cut.
-        // _speedW: 0 at ?? km/h ??1 at ??5 km/h.
-        // _distW:  0 at ?? m moved ??1 at ??0 m moved.
-        // _coordW = _speedW 횞 _distW: BOTH conditions must be met for coordinate bearing.
-        // Below 3 km/h the block is skipped entirely ??bearing is frozen.
-        // updateDriverMarker must NOT modify brg (single source in renderLoop)
-        if (_prevSnappedLat != null && _prevSnappedLng != null && speedKmh >= 3) {
-            var _moveDist = haversineM(sl, sa, _prevSnappedLat, _prevSnappedLng);
-            var _tangentBrg = (typeof turf !== 'undefined' && _driverRouteLine)
-                ? getRouteTangentBearing(sa, sl) : null;
-            var _speedW = Math.min(Math.max((speedKmh - 5) / 10, 0), 1);
-            var _distW  = Math.min(Math.max((_moveDist - 3) / 7, 0), 1);
-            var _coordW = _speedW * _distW;
-            var _coordBrg = _moveDist >= 3 ? calcBearing(_prevSnappedLat, _prevSnappedLng, sl, sa) : brg;
-            var _tangBrg  = _tangentBrg !== null ? _tangentBrg : brg;
-            var _blendDiff = ((_coordBrg - _tangBrg + 540) % 360) - 180;
-            var _blended  = (_tangBrg + _blendDiff * _coordW + 360) % 360;
-            var _delta = Math.abs(((_blended - brg + 540) % 360) - 180);
-            // brg is owned by renderLoop (route-based single source)
-        }
         if (!driverMarker) {
             var _tangentInit = (typeof turf !== 'undefined' && _driverRouteLine)
                 ? getRouteTangentBearing(sa, sl) : null;
@@ -1963,7 +1874,8 @@ function updateProgressiveRoute(driverLon, driverLat) {
     var idx = Math.max(0, Math.min(_routeAnchorIdx, _driverRouteCoords.length - 2));
     if (_lastProgressAnchorIdx !== null && idx <= _lastProgressAnchorIdx) return;
 
-    var remainingCoords = _driverRouteCoords.slice(idx);
+    // Start polyline at exact snapped position (same as marker), not at route vertex idx.
+    var remainingCoords = [[driverLon, driverLat]].concat(_driverRouteCoords.slice(idx + 1));
     if (!remainingCoords || remainingCoords.length < 2) return;
 
     // [lon,lat] -> [lat,lng] for buildRouteGeoJSON
@@ -2016,7 +1928,6 @@ async function tryReroute(lat, lng) {
     _lastRerouteTime = now;
 
     try {
-        _firstSnapDone = false;
         _routeAnchorIdx = 0;
         resetRouteProgress();
         console.log('[ANCHOR UPDATE]', _routeAnchorIdx);
