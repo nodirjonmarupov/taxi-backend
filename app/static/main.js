@@ -737,9 +737,6 @@ function renderLoop() {
         // Larger ratio = vehicle lower on screen = more road visible ahead.
         // GPU redraw suppressed when position and bearing are sub-pixel stable.
         if (dLat !== null) {
-            if (Date.now() < _camBlockUntil) {
-                return;
-            }
             // Smooth zoom via EMA (alpha=0.02/frame) to prevent flicker at speed-band boundaries.
             var _zoomTarget = speedToZoom(spd);
             if (_stableZoom === null) { _stableZoom = _zoomTarget; }
@@ -752,18 +749,20 @@ function renderLoop() {
             var _zoomDelta = Math.abs(_zoom - _lastCamZoom);
             if ((_nowMs - _lastCamUpdate > 130) &&
                 (_moved || _brgDelta > 2 || _zoomDelta > 0.1)) {
-                map.easeTo({
-                    center: [dLng, dLat],
-                    bearing: displayBearing,
-                    pitch: 60,
-                    zoom: _zoom,
-                    duration: 650,
-                    easing: function(t){ return t * (2 - t); }
-                });
+                if (Date.now() >= _camBlockUntil) {
+                    map.easeTo({
+                        center: [dLng, dLat],
+                        bearing: displayBearing,
+                        pitch: 60,
+                        zoom: _zoom,
+                        duration: 650,
+                        easing: function(t){ return t * (2 - t); }
+                    });
 
-                _lastCamLat = dLat;
-                _lastCamLng = dLng;
-                _lastCamUpdate = _nowMs;
+                    _lastCamLat = dLat;
+                    _lastCamLng = dLng;
+                    _lastCamUpdate = _nowMs;
+                }
             }
         }
 
