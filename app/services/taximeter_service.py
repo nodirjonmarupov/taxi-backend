@@ -93,12 +93,12 @@ def compute_fare(
 ) -> Decimal:
     """
     Billing (frozen tariff_snapshot per trip, Decimal math):
+      base_part = min_price (START/BASE) — har doim ustiga qo'shiladi
       distance_part = distance_km * km_price * surge (surge [1,2] faqat masofa)
       Kutish (biznes qoidasi): 1..60s => 1000 so'm, har keyingi to'liq daqiqa +500 so'm.
         waiting_part = 0 if waiting_seconds <= 0
         else 1000 + floor((waiting_seconds - 1) / 60) * 500
-      base_total = max(min_price, distance_part)  -- minimal safar narxi
-      total = base_total + waiting_part           -- kutish alohida ustiga qo'shiladi
+      total = base_part + distance_part + waiting_part
     Keyin round_to (100 so'm).
     """
     min_price = Decimal(str(tariff_snapshot.get("base", 0)))
@@ -115,8 +115,8 @@ def compute_fare(
         extra_blocks = int(floor((ws - 1.0) / 60.0))
         waiting_part = Decimal("1000") + Decimal(str(extra_blocks)) * Decimal("500")
     distance_part = d_km * km_p * surge
-    base_total = max(min_price, distance_part)
-    total = base_total + waiting_part
+    base_part = min_price
+    total = base_part + distance_part + waiting_part
     if round_to <= 0:
         return total
     return Decimal(round_to_100_half_up(total))

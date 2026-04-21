@@ -76,13 +76,15 @@ class PricingService:
         tariff: TariffSettings,
     ) -> float:
         """
-        max(min_price, km * price_per_km) — surge faqat masofa qismiga,
-        keyin 100 so'm HALF_UP (taximeter yakunida kutish alohida).
+        Additive model:
+          base_part = min_price (START/BASE)
+          distance_part = km * price_per_km (surge faqat masofa qismiga)
+        Keyin 100 so'm HALF_UP (taximeter yakunida kutish alohida).
         """
         km_part = float(distance_km) * float(tariff.price_per_km)
         if tariff.is_surge_active and tariff.surge_multiplier and tariff.surge_multiplier > 0:
             km_part *= float(tariff.surge_multiplier)
-        raw = max(float(tariff.min_price), km_part)
+        raw = float(tariff.min_price) + km_part
         return float(round_to_100_half_up(Decimal(str(raw))))
 
     @staticmethod
