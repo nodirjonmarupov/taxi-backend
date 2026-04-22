@@ -359,5 +359,7 @@ def calculate_price(
     s: TariffSettings,
 ) -> float:
     from app.services.pricing_service import PricingService
+    from app.services.taximeter_service import compute_fare
 
-    return PricingService.apply_tariff_and_round_to_100(distance_km, s)
+    snap = PricingService.build_tariff_snapshot_from_settings(s)
+    return float(compute_fare(snap, distance_km, 0))

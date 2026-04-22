@@ -171,7 +171,9 @@ async def _create_and_distribute_order(
         async def _run_with_db(db):
             tariff = await get_settings(db)
             distance_km = 0.0
-            estimated_price = PricingService.apply_tariff_and_round_to_100(distance_km, tariff)
+            snap = PricingService.build_tariff_snapshot_from_settings(tariff)
+            from app.services.taximeter_service import compute_fare
+            estimated_price = float(compute_fare(snap, distance_km, 0))
 
             # ── Bonus freeze (SELECT FOR UPDATE ── race-condition himoyasi) ──
             # User row'ni lock qilamiz: bir vaqtda ikkita qurilmadan bosishda

@@ -62,6 +62,22 @@ def calculate_price(
     Returns:
         Total price
     """
+    # region agent log
+    try:
+        import json, time  # noqa
+        with open("debug-4d6510.log", "a", encoding="utf-8") as _f:
+            _f.write(json.dumps({
+                "sessionId": "4d6510",
+                "runId": "pre-fix",
+                "hypothesisId": "H1",
+                "location": "app/utils/geo.py:calculate_price",
+                "message": "legacy_calculate_price_called",
+                "data": {"distance_km": float(distance_km)},
+                "timestamp": int(time.time() * 1000),
+            }) + "\n")
+    except Exception:
+        pass
+    # endregion
     return round(base_price + (distance_km * price_per_km), 2)
 
 

@@ -684,9 +684,7 @@ async def trip_meter(
         snap = getattr(order, "tariff_snapshot_json", None)
     if not snap:
         s = await _get_settings_webapp(db)
-        snap = billing_fallback_tariff_no_stored_snapshot(
-            float(s.min_price), float(s.price_per_km), float(s.price_per_min_waiting)
-        )
+        snap = _tariff_snapshot_from_settings(s)
     # Read-only live credit for an active manual pause: if pause_started_ts is set,
     # add the elapsed paused time to waiting_seconds for THIS response only.
     # Redis state is NOT mutated here; the authoritative credit is still applied

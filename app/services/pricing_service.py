@@ -4,16 +4,15 @@ OSRM yo'l masofasi + zaxira (Haversine * shahar koeffitsiyenti) + tarif + 100 so
 """
 from __future__ import annotations
 
-from decimal import Decimal
-from typing import Optional, Tuple
+from typing import Any, Dict, Optional, Tuple
 
 import httpx
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.logger import get_logger
-from app.services.settings_service import TariffSettings, get_settings
+from app.services.settings_service import get_settings
+from app.services.taximeter_service import compute_fare, resolve_effective_surge_multiplier
 from app.utils.distance import haversine_distance
-from app.utils.money_rounding import round_to_100_half_up
 
 logger = get_logger(__name__)
 
@@ -25,6 +24,21 @@ HTTP_TIMEOUT_SEC = 15.0
 
 class PricingService:
     """Masofa (OSRM / zaxira) va narx (bazadagi tarif + 100 so'm yaxlitlash)."""
+
+    @staticmethod
+    def build_tariff_snapshot_from_settings(s: Any) -> Dict[str, Any]:
+        """
+        Single source of truth for ALL pricing snapshots.
+        Matches WebApp snapshot fields consumed by compute_fare().
+        """
+        surge = resolve_effective_surge_multiplier(s)
+        return {
+            "base": float(getattr(s, "min_price", 0) or 0),
+            "km": float(getattr(s, "price_per_km", 0) or 0),
+            "wait": float(getattr(s, "price_per_min_waiting", 0) or 0),
+            "surge_multiplier": float(surge),
+            "tariff_version": 1,
+        }
 
     @staticmethod
     async def fetch_osrm_distance_km(
@@ -71,23 +85,6 @@ class PricingService:
         return h * CITY_DETOUR_COEFFICIENT
 
     @staticmethod
-    def apply_tariff_and_round_to_100(
-        distance_km: float,
-        tariff: TariffSettings,
-    ) -> float:
-        """
-        Additive model:
-          base_part = min_price (START/BASE)
-          distance_part = km * price_per_km (surge faqat masofa qismiga)
-        Keyin 100 so'm HALF_UP (taximeter yakunida kutish alohida).
-        """
-        km_part = float(distance_km) * float(tariff.price_per_km)
-        if tariff.is_surge_active and tariff.surge_multiplier and tariff.surge_multiplier > 0:
-            km_part *= float(tariff.surge_multiplier)
-        raw = float(tariff.min_price) + km_part
-        return float(round_to_100_half_up(Decimal(str(raw))))
-
-    @staticmethod
     async def estimate_trip_price(
         db: AsyncSession,
         pickup_lat: float,
@@ -101,7 +98,7 @@ class PricingService:
         Returns:
             (distance_km, estimated_price_soum)
         """
-        tariff = await get_settings(db)
+        s = await get_settings(db)
         dist = await PricingService.fetch_osrm_distance_km(
             pickup_lat, pickup_lon, dest_lat, dest_lon
         )
@@ -115,9 +112,10 @@ class PricingService:
         else:
             logger.info(f"Narx: OSRM masofa = {dist:.4f} km")
 
-        price = PricingService.apply_tariff_and_round_to_100(dist, tariff)
+        snap = PricingService.build_tariff_snapshot_from_settings(s)
+        price = float(compute_fare(snap, dist, 0))
         logger.info(
             f"[PRICE CALCULATED] estimate dist_km={dist:.4f} rounded_price={price} "
-            f"(min_price={tariff.min_price} price_per_km={tariff.price_per_km})"
+            f"(min_price={snap.get('base')} price_per_km={snap.get('km')} surge_multiplier={snap.get('surge_multiplier')})"
         )
         return dist, price
