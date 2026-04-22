@@ -2282,7 +2282,9 @@ function updateTaximeter() {
     }
 
     function _renderFare(n) {
-        curFareEl.textContent = Math.round(Number(n)).toLocaleString('en-US');
+        const step = 100;
+        const stepped = Math.floor(Number(n) / step) * step;
+        curFareEl.textContent = stepped.toLocaleString('en-US');
     }
 
     function _tick(ts) {

@@ -702,7 +702,22 @@ async def trip_meter(
     else:
         ws_effective = ws_stored
 
-    est = compute_fare(snap, float(st.get("distance_km") or 0), ws_effective)
+    is_waiting_mode = bool(st.get("is_waiting"))
+    waiting_seconds_raw = ws_effective
+    ws_for_compute_fare = ws_effective if is_waiting_mode else 0
+    # region agent log
+    logger.info(
+        json.dumps(
+            {
+                "waiting_seconds_raw": waiting_seconds_raw,
+                "is_waiting_mode": is_waiting_mode,
+                "ws_effective": ws_for_compute_fare,
+            },
+            default=str,
+        )
+    )
+    # endregion
+    est = compute_fare(snap, float(st.get("distance_km") or 0), ws_for_compute_fare)
     _raw_surge = float(snap.get("surge_multiplier") or 1.0)
     _surge_out = max(1.0, min(2.0, _raw_surge))
     _dist_out = float(st.get("distance_km") or 0)
