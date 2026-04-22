@@ -24,9 +24,7 @@ from app.crud.user import UserCRUD, DriverCRUD
 from app.services.settings_service import get_settings, SettingsLoadError
 from app.utils.trip_finish import sanitize_distance_km
 from app.services.taximeter_service import (
-    billing_fallback_tariff_no_stored_snapshot,
     compute_fare,
-    resolve_effective_surge_multiplier,
     update_distance,
 )
 from app.services.trip_billing import compute_server_final_price_for_completion
@@ -34,6 +32,11 @@ from app.models.order import Order, OrderStatus
 from app.core.logger import get_logger
 
 logger = get_logger(__name__)
+
+# PRICING CHECKPOINT (stable model):
+# SURGE_DISABLED_NEW_SNAPSHOTS = TRUE
+# WAITING_MANUAL_ONLY = TRUE
+# ALL_PATHS_USE_COMPUTE_FARE = TRUE
 
 router = APIRouter(prefix="/api/webapp", tags=["webapp"])
 
@@ -72,15 +75,12 @@ def _sanitize_distance(km) -> float:
 
 
 def _tariff_snapshot_from_settings(s, at: Optional[datetime] = None) -> dict:
-    """get_tariff bilan mos: tariff + muzlatilgan surge (vaqt va admin max qoidasi)."""
-    if at is None:
-        at = datetime.now()
-    surge = resolve_effective_surge_multiplier(s, at)
+    """get_tariff bilan mos: tariff snapshot (surge pricing o'chirilgan — yangi safarlar 1.0)."""
     return {
         "base": float(s.min_price),
         "km": float(s.price_per_km),
         "wait": float(s.price_per_min_waiting),
-        "surge_multiplier": surge,
+        "surge_multiplier": 1.0,
         "tariff_version": 1,
     }
 
@@ -120,14 +120,12 @@ async def _ensure_trip_state_for_order_start(
 async def get_tariff(db: AsyncSession = Depends(get_db)):
     """Taximeter uchun tarif (startPrice, pricePerKm, pricePerMinWaiting, minDistanceUpdate)."""
     s = await _get_settings_webapp(db)
-    at = datetime.now()
-    eff_surge = resolve_effective_surge_multiplier(s, at)
     return {
         "startPrice": float(s.min_price),
         "pricePerKm": float(s.price_per_km),
         "pricePerMinWaiting": float(s.price_per_min_waiting),
         "minDistanceUpdate": 0.02,
-        "surge_multiplier": eff_surge,
+        "surge_multiplier": 1.0,
         "is_surge_active": s.is_surge_active,
         "min_price": float(s.min_price),
         "price_per_km": float(s.price_per_km),
@@ -644,6 +642,10 @@ async def trip_resume(
     st["pause_started_ts"] = None
     st["updated_at"] = now
     set_trip_state(redis, order_id, st)
+    if paused > 0:
+        prev_db = float(getattr(order, "waiting_seconds", None) or 0.0)
+        order.waiting_seconds = prev_db + float(paused)
+        await db.commit()
     return {"ok": True}
 
 
@@ -704,19 +706,18 @@ async def trip_meter(
 
     is_waiting_mode = bool(st.get("is_waiting"))
     waiting_seconds_raw = ws_effective
-    ws_for_compute_fare = ws_effective if is_waiting_mode else 0
-    # region agent log
-    logger.info(
-        json.dumps(
-            {
-                "waiting_seconds_raw": waiting_seconds_raw,
-                "is_waiting_mode": is_waiting_mode,
-                "ws_effective": ws_for_compute_fare,
-            },
-            default=str,
+    ws_for_compute_fare = ws_effective
+    if settings.DEBUG:
+        logger.info(
+            json.dumps(
+                {
+                    "waiting_seconds_raw": waiting_seconds_raw,
+                    "is_waiting_mode": is_waiting_mode,
+                    "ws_effective": ws_for_compute_fare,
+                },
+                default=str,
+            )
         )
-    )
-    # endregion
     est = compute_fare(snap, float(st.get("distance_km") or 0), ws_for_compute_fare)
     _raw_surge = float(snap.get("surge_multiplier") or 1.0)
     _surge_out = max(1.0, min(2.0, _raw_surge))

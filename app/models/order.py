@@ -41,6 +41,11 @@ class Order(Base):
     final_price: Mapped[Optional[float]] = mapped_column(Numeric(10, 2), nullable=True)
     distance_km: Mapped[float] = mapped_column(Float, default=0.0, nullable=False, server_default="0")
 
+    # Manual pause (trip_resume) kumulyativ soniya — Redis yo'qolganda billing uchun
+    waiting_seconds: Mapped[Optional[float]] = mapped_column(
+        Float, nullable=True, server_default="0"
+    )
+
     last_lat: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     last_lon: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     

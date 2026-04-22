@@ -144,10 +144,11 @@ def _segment_speed_kmh(segment_km: float, delta_s: float) -> float:
 def apply_waiting_delta(
     trip_state: Dict[str, Any],
     delta_seconds: float,
-    speed_kmh: float,
+    _speed_kmh: float,
 ) -> Dict[str, Any]:
     """
-    Increment waiting_seconds when speed < WAITING_SPEED_KMH (automatic waiting).
+    waiting_seconds faqat manual pause (trip_resume) orqali to'ldiriladi — GPS past tezlik
+    avto-kutish narxi uchun ishlatilmaydi.
 
     When manual pause is active (pause_started_ts set), GPS ticks do not add waiting —
     paused time is credited only on resume to avoid double-counting with resume.
@@ -160,10 +161,6 @@ def apply_waiting_delta(
     if out.get("pause_started_ts") is not None:
         return out
 
-    low_speed = speed_kmh < WAITING_SPEED_KMH
-    if low_speed:
-        ws = float(out.get("waiting_seconds") or 0)
-        out["waiting_seconds"] = ws + delta_seconds
     return out
 
 

@@ -11,10 +11,15 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.logger import get_logger
 from app.services.settings_service import get_settings
-from app.services.taximeter_service import compute_fare, resolve_effective_surge_multiplier
+from app.services.taximeter_service import compute_fare
 from app.utils.distance import haversine_distance
 
 logger = get_logger(__name__)
+
+# PRICING CHECKPOINT (stable model):
+# SURGE_DISABLED_NEW_SNAPSHOTS = TRUE
+# WAITING_MANUAL_ONLY = TRUE
+# ALL_PATHS_USE_COMPUTE_FARE = TRUE
 
 # OSRM umumiy server (demo). Ishlab chiqarishda o'z serveringizni ishlating.
 OSRM_ROUTE_BASE = "https://router.project-osrm.org/route/v1/driving"
@@ -31,12 +36,11 @@ class PricingService:
         Single source of truth for ALL pricing snapshots.
         Matches WebApp snapshot fields consumed by compute_fare().
         """
-        surge = resolve_effective_surge_multiplier(s)
         return {
             "base": float(getattr(s, "min_price", 0) or 0),
             "km": float(getattr(s, "price_per_km", 0) or 0),
             "wait": float(getattr(s, "price_per_min_waiting", 0) or 0),
-            "surge_multiplier": float(surge),
+            "surge_multiplier": 1.0,
             "tariff_version": 1,
         }
 
