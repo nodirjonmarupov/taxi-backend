@@ -27,6 +27,7 @@ from app.models.order import Order, OrderStatus
 from app.core.logger import get_logger
 from app.core.config import settings
 from app.bot.handlers.user_handlers import UserStates
+from app.bot.handlers.user_handlers import ask_phone
 from app.bot.keyboards.main_menu import get_main_keyboard
 from app.bot.messages import get_text
 from app.services.matching import DriverMatchingService
@@ -393,6 +394,10 @@ async def pickup_location(message: Message, state: FSMContext, lang: str = "uz")
             user_lang = getattr(user, "language_code", None) or lang
             driver_check = await DriverCRUD.get_by_user_id(db, user.id)
             is_driver = driver_check is not None
+
+            if not (getattr(user, "phone", None) or "").strip():
+                await ask_phone(message, state, lang=user_lang)
+                return
 
             # Concurrency-safe: lock the user row so two parallel location messages
             # cannot both pass the active-order check and create duplicates.

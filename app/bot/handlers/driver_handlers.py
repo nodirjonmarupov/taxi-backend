@@ -667,6 +667,7 @@ async def accept_order(callback: CallbackQuery):
                         f"{get_text(user_lang, 'driver_found_title')}\n\n"
                         f"👨‍✈️ {user.first_name}\n"
                         f"🚗 {driver.car_model} ({driver.car_number})\n"
+                        f"📞 Haydovchi: {getattr(user, 'phone', None) or 'N/A'}\n"
                         f"⭐️ {get_text(user_lang, 'rating_label')}: {driver.rating:.1f}/5.0\n\n"
                         f"{get_text(user_lang, 'taxi_arriving')}\n"
                         f"{get_text(user_lang, 'chat_via_bot')}"

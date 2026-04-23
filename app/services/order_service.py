@@ -25,6 +25,7 @@ def _format_driver_timer_message(
     min_distance: float,
     first_name: str,
     remaining: int,
+    customer_phone: str = "N/A",
 ) -> str:
     """Haydovchi xabari: soat emoji + progress bar"""
     elapsed = DRIVER_TIMEOUT_SECONDS - remaining
@@ -38,6 +39,7 @@ def _format_driver_timer_message(
         f"🚕 <b>YANGI BUYURTMA!</b>\n\n"
         f"📍 Masofa: {min_distance:.1f} km\n"
         f"👤 Mijoz: {first_name}\n\n"
+        f"📞 Mijoz: {customer_phone or 'N/A'}\n\n"
         f"Sizga yangi buyurtma! Qabul qilish uchun vaqt: ({remaining}) soniya\n"
         f"{clock} [{progress_bar}]"
     )
@@ -91,6 +93,7 @@ async def _run_driver_accept_timer(
     message_id: int,
     min_distance: float,
     first_name: str,
+    customer_phone: str,
     on_timeout: Callable[[int], Awaitable[None]],
 ):
     """15 soniyalik qabul qilish taymeri."""
@@ -113,7 +116,12 @@ async def _run_driver_accept_timer(
                 await bot.edit_message_text(
                     chat_id=driver_chat_id,
                     message_id=message_id,
-                    text=_format_driver_timer_message(min_distance, first_name, remaining),
+                    text=_format_driver_timer_message(
+                        min_distance,
+                        first_name,
+                        remaining,
+                        customer_phone=customer_phone or "N/A",
+                    ),
                     reply_markup=driver_kb,
                 )
             except Exception:
@@ -216,6 +224,9 @@ async def offer_to_next_driver(order_id: int, from_timeout_or_reject: bool = Fal
     driver_id, min_distance = candidates[idx]
 
     async with AsyncSessionLocal() as db:
+        customer_user = await UserCRUD.get_by_telegram_id(db, customer_telegram_id)
+        customer_phone = getattr(customer_user, "phone", None) if customer_user else None
+
         driver = await DriverCRUD.get_by_id(db, driver_id)
         if not driver:
             asyncio.create_task(offer_to_next_driver(order_id, from_timeout_or_reject=True))
@@ -233,7 +244,12 @@ async def offer_to_next_driver(order_id: int, from_timeout_or_reject: bool = Fal
             first_name = getattr(driver_user, "first_name", None) or "Mijoz"
             driver_msg = await bot.send_message(
                 chat_id=driver_user.telegram_id,
-                text=_format_driver_timer_message(min_distance, first_name, DRIVER_TIMEOUT_SECONDS),
+                text=_format_driver_timer_message(
+                    min_distance,
+                    first_name,
+                    DRIVER_TIMEOUT_SECONDS,
+                    customer_phone=customer_phone or "N/A",
+                ),
                 reply_markup=driver_kb,
                 parse_mode="HTML",
             )
@@ -246,6 +262,7 @@ async def offer_to_next_driver(order_id: int, from_timeout_or_reject: bool = Fal
                     driver_msg.message_id,
                     min_distance,
                     first_name,
+                    customer_phone or "N/A",
                     lambda oid: offer_to_next_driver(oid, from_timeout_or_reject=True),
                 )
             )

@@ -40,7 +40,20 @@ LANG_BUTTONS = InlineKeyboardMarkup(inline_keyboard=[
 
 class UserStates(StatesGroup):
     """User buyurtma holatlari"""
+    waiting_for_phone = State()
     waiting_for_pickup = State()
+
+
+async def ask_phone(message: Message, state: FSMContext, *, lang: str) -> None:
+    await message.answer(
+        get_text(lang, "request_phone"),
+        reply_markup=ReplyKeyboardMarkup(
+            keyboard=[[KeyboardButton(text="📞", request_contact=True)]],
+            resize_keyboard=True,
+        ),
+        parse_mode="HTML",
+    )
+    await state.set_state(UserStates.waiting_for_phone)
 
 
 async def send_main_menu(message: Message, *, lang: str, is_driver: bool, name: str) -> None:
@@ -136,11 +149,49 @@ async def lang_selected(callback: CallbackQuery, state: FSMContext, lang: str = 
             except Exception:
                 pass
 
+        if not (getattr(user, "phone", None) or "").strip():
+            await ask_phone(callback.message, state, lang=code)
+            await callback.answer(get_text(code, "lang_saved_toast"))
+            return
+
         await send_main_menu(callback.message, lang=code, is_driver=is_driver, name=name)
         await callback.answer(get_text(code, "lang_saved_toast"))
     except Exception as e:
         logger.error(f"❌ Til tanlash xato: {e}")
         await callback.answer(get_text("uz", "error"), show_alert=True)
+
+
+@user_router.message(UserStates.waiting_for_phone, F.contact)
+async def save_phone_contact(message: Message, state: FSMContext, lang: str = "uz"):
+    contact = message.contact
+    if not contact or contact.user_id != message.from_user.id:
+        await message.answer(get_text(lang, "phone_wrong_contact"), parse_mode="HTML")
+        return
+
+    raw = (contact.phone_number or "").replace(" ", "")
+    phone = raw if raw.startswith("+") else f"+{raw}"
+
+    async with AsyncSessionLocal() as db:
+        user = await UserCRUD.get_by_telegram_id(db, message.from_user.id)
+        if not user:
+            await message.answer(get_text(lang, "error"), parse_mode="HTML")
+            await state.clear()
+            return
+        user.phone = phone
+        await db.commit()
+
+        driver = await DriverCRUD.get_by_user_id(db, user.id)
+        is_driver = driver is not None
+        name = (user.first_name or "").strip() or "User"
+
+    await message.answer(get_text(lang, "phone_saved"), reply_markup=ReplyKeyboardRemove(), parse_mode="HTML")
+    await state.clear()
+    await send_main_menu(message, lang=lang, is_driver=is_driver, name=name)
+
+
+@user_router.message(UserStates.waiting_for_phone)
+async def save_phone_invalid(message: Message, state: FSMContext, lang: str = "uz"):
+    await ask_phone(message, state, lang=lang)
 
 
 ORDER_TAXI_BUTTON_TEXTS = {
@@ -156,6 +207,11 @@ ORDER_TAXI_BUTTON_TEXTS = {
 @user_router.message(F.text.in_(ORDER_TAXI_BUTTON_TEXTS))
 async def order_taxi(message: Message, state: FSMContext, lang: str = "uz"):
     """Taksi buyurtma boshlash"""
+    async with AsyncSessionLocal() as db:
+        user = await UserCRUD.get_by_telegram_id(db, message.from_user.id)
+        if user and not (getattr(user, "phone", None) or "").strip():
+            await ask_phone(message, state, lang=lang)
+            return
     await message.answer(
         get_text(lang, "order_taxi"),
         reply_markup=ReplyKeyboardMarkup(
