@@ -48,7 +48,7 @@ async def ask_phone(message: Message, state: FSMContext, *, lang: str) -> None:
     await message.answer(
         get_text(lang, "request_phone"),
         reply_markup=ReplyKeyboardMarkup(
-            keyboard=[[KeyboardButton(text="📞", request_contact=True)]],
+            keyboard=[[KeyboardButton(text="📞 Telefon yuborish", request_contact=True)]],
             resize_keyboard=True,
         ),
         parse_mode="HTML",
@@ -168,7 +168,7 @@ async def save_phone_contact(message: Message, state: FSMContext, lang: str = "u
         await message.answer(get_text(lang, "phone_wrong_contact"), parse_mode="HTML")
         return
 
-    raw = (contact.phone_number or "").replace(" ", "")
+    raw = (contact.phone_number or "").replace(" ", "").replace("-", "")
     phone = raw if raw.startswith("+") else f"+{raw}"
 
     async with AsyncSessionLocal() as db:
