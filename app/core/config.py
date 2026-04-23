@@ -123,6 +123,16 @@ class Settings(BaseSettings):
     WEBAPP_BASE_URL: str = Field(default="https://candid-semiexposed-dung.ngrok-free.dev")
     WORKERS: int = 4
 
+    # Manual taximeter: order.user_id must not be the driver; use this DB user or auto-create by telegram id below
+    MANUAL_TRIP_CUSTOMER_USER_ID: Optional[int] = Field(
+        default=None,
+        description="users.id for manual-trip orders (no real client). If unset, a placeholder user is created with MANUAL_TRIP_CUSTOMER_TELEGRAM_ID.",
+    )
+    MANUAL_TRIP_CUSTOMER_TELEGRAM_ID: int = Field(
+        default=-910001001002,
+        description="Reserved telegram_id for auto-created placeholder customer user (manual taximeter).",
+    )
+
 
 # Global settings instance
 settings = Settings()

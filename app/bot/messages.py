@@ -90,7 +90,9 @@ MESSAGES = {
         "driver_btn_link_card": "💳 Kartani bog'lash",
         "driver_btn_balance": "💰 Balans",
         "driver_btn_group": "👥 Guruhga qo'shilish",
-        "driver_btn_open_taximeter": "🚖 Taksometrni ochish",
+        "driver_btn_open_taximeter": "🚕 Taksometrni ochish",
+        "driver_manual_taximeter_ready": "🚕 <b>Manual safar boshlandi</b>\n\nBuyurtma №{order_id}\nPastdagi tugmani bosing.",
+        "driver_manual_taximeter_active": "✅ <b>Faol buyurtma.</b>\n\n№{order_id} — taksometrni oching.",
         "driver_btn_write_customer": "💬 Mijozga yozish",
         "driver_chat_tip_alert": "Bot orqali yozishingiz mumkin!",
         "taximeter_chat_banner": "💬 CHAT: BOTDA",
@@ -314,7 +316,9 @@ MESSAGES = {
         "driver_btn_link_card": "💳 Привязать карту",
         "driver_btn_balance": "💰 Баланс",
         "driver_btn_group": "👥 Группа водителей",
-        "driver_btn_open_taximeter": "🚖 Открыть таксометр",
+        "driver_btn_open_taximeter": "🚕 Открыть таксометр",
+        "driver_manual_taximeter_ready": "🚕 <b>Ручная поездка началась</b>\n\nЗаказ №{order_id}\nНажмите кнопку ниже.",
+        "driver_manual_taximeter_active": "✅ <b>Активный заказ.</b>\n\n№{order_id} — откройте таксометр.",
         "driver_btn_write_customer": "💬 Написать клиенту",
         "driver_chat_tip_alert": "Можно писать через бота!",
         "taximeter_chat_banner": "💬 ЧАТ: В БОТЕ",
@@ -537,7 +541,9 @@ MESSAGES = {
         "driver_btn_link_card": "💳 Карта боғлаш",
         "driver_btn_balance": "💰 Баланс",
         "driver_btn_group": "👥 Гуруҳга қўшилиш",
-        "driver_btn_open_taximeter": "🚖 Таксометрни очиш",
+        "driver_btn_open_taximeter": "🚕 Таксометрни очиш",
+        "driver_manual_taximeter_ready": "🚕 <b>Қўлда сафар бошланди</b>\n\nБуюртма №{order_id}\nПастдаги тугмани босинг.",
+        "driver_manual_taximeter_active": "✅ <b>Фаол буюртма.</b>\n\n№{order_id} — таксометрни очинг.",
         "driver_btn_write_customer": "💬 Мижозга ёзиш",
         "driver_chat_tip_alert": "Бот орқали ёзишингиз мумкин!",
         "taximeter_chat_banner": "💬 ЧАТ: БОТДА",
@@ -695,6 +701,9 @@ DRIVER_BALANCE_TEXTS = frozenset(
 )
 DRIVER_GROUP_TEXTS = frozenset(
     MESSAGES[ln]["driver_btn_group"] for ln in ("uz", "ru", "uz_cyrl")
+)
+DRIVER_OPEN_TAXIMETER_TEXTS = frozenset(
+    MESSAGES[ln]["driver_btn_open_taximeter"] for ln in ("uz", "ru", "uz_cyrl")
 )
 
 

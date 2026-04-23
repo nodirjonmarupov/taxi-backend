@@ -18,11 +18,13 @@ from app.core.database import AsyncSessionLocal
 from app.core.redis import get_redis, get_trip_state, delete_trip_state
 from app.crud.user import UserCRUD, DriverCRUD
 from app.models.user import UserRole
+from app.schemas.user import UserCreate
 from app.models.order import Order, OrderStatus
 from app.core.logger import get_logger
 from app.core.config import settings
 from app.utils.distance import haversine_distance
 from sqlalchemy import text, select
+from sqlalchemy.exc import IntegrityError
 from app.services.taximeter_service import accumulate_order_distance_for_driver
 from app.bot.keyboards.driver_keyboards import (
     DRIVER_GROUP_INVITE_URL,
@@ -40,12 +42,141 @@ from app.bot.messages import (
     DRIVER_LINK_CARD_TEXTS,
     DRIVER_BALANCE_TEXTS,
     DRIVER_GROUP_TEXTS,
+    DRIVER_OPEN_TAXIMETER_TEXTS,
 )
 from app.bot.lang_utils import db_lang_for_telegram
 
 logger = get_logger(__name__)
 
 driver_router = Router()
+
+
+def driver_taximeter_reply_markup(
+    driver_ui_lang: str,
+    order_id: int,
+    driver_id: int,
+    *,
+    with_chat: bool = False,
+) -> InlineKeyboardMarkup:
+    """Taksometr WebApp tugmasi (accept va qo'lda ochish uchun bir xil URL/token)."""
+    from app.utils.webapp_token import generate_webapp_token
+
+    base_url = getattr(settings, "WEBAPP_BASE_URL", "https://candid-semiexposed-dung.ngrok-free.dev")
+    ts = int(time.time())
+    token = generate_webapp_token(order_id, driver_id)
+    webapp_url = f"{base_url}/taximeter_v2?order_id={order_id}&token={token}&t={ts}&v={ts}"
+    rows: list[list[InlineKeyboardButton]] = [
+        [
+            InlineKeyboardButton(
+                text=get_text(driver_ui_lang, "driver_btn_open_taximeter"),
+                web_app=WebAppInfo(url=webapp_url),
+            )
+        ],
+    ]
+    if with_chat:
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text=get_text(driver_ui_lang, "driver_btn_write_customer"),
+                    callback_data="driver_chat_tip",
+                )
+            ]
+        )
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+async def _notify_customer_driver_assigned(
+    bot,
+    db,
+    *,
+    order: Order,
+    driver,
+    driver_user,
+) -> None:
+    """Haydovchi biriktirilgach mijozga xabar + tracking (callback accept_order bilan bir xil yo'l)."""
+    order_user = await UserCRUD.get_by_id(db, order.user_id)
+    if not order_user:
+        return
+    if getattr(order, "user_tracking_message_id", None):
+        return
+    try:
+        user_lang = normalize_bot_lang(getattr(order_user, "language_code", None) or "uz")
+        base_url = getattr(settings, "WEBAPP_BASE_URL", "https://candid-semiexposed-dung.ngrok-free.dev")
+        ts = int(time.time())
+        tracking_url = f"{base_url}/tracking?order_id={order.id}&t={ts}"
+        tracking_kb = InlineKeyboardMarkup(
+            inline_keyboard=[
+                [
+                    InlineKeyboardButton(
+                        text=get_text(user_lang, "track_driver"),
+                        web_app=WebAppInfo(url=tracking_url),
+                    )
+                ],
+                [
+                    InlineKeyboardButton(
+                        text=get_text(user_lang, "user_btn_write_driver"),
+                        callback_data="user_chat_tip",
+                    )
+                ],
+            ]
+        )
+        driver_msg = (
+            f"{get_text(user_lang, 'driver_found_title')}\n\n"
+            f"👨‍✈️ {driver_user.first_name}\n"
+            f"🚗 {driver.car_model} ({driver.car_number})\n"
+            f"📞 Haydovchi: {getattr(driver_user, 'phone', None) or 'N/A'}\n"
+            f"⭐️ {get_text(user_lang, 'rating_label')}: {driver.rating:.1f}/5.0\n\n"
+            f"{get_text(user_lang, 'taxi_arriving')}\n"
+            f"{get_text(user_lang, 'chat_via_bot')}"
+        )
+        sent_msg = await bot.send_message(
+            chat_id=order_user.telegram_id,
+            text=driver_msg,
+            reply_markup=tracking_kb,
+            parse_mode="HTML",
+        )
+        order.user_tracking_message_id = sent_msg.message_id
+        await db.commit()
+        logger.info("✅ Mijozga xabar yuborildi (tracking mid=%s)", sent_msg.message_id)
+    except Exception as e:
+        logger.error(f"❌ Mijozga xabar yuborishda xato: {e}")
+
+
+async def _manual_order_customer_user_id(db, driver_user_id: int) -> int:
+    """Manual buyurtma uchun mijoz users.id — haydovchi hisobi emas (Order.user_id FK)."""
+    env_uid = getattr(settings, "MANUAL_TRIP_CUSTOMER_USER_ID", None)
+    if env_uid is not None:
+        uid = int(env_uid)
+        u = await UserCRUD.get_by_id(db, uid)
+        if not u:
+            raise ValueError("manual_customer_user_missing")
+        if uid == driver_user_id:
+            raise ValueError("manual_customer_is_driver")
+        return uid
+
+    fixed_tg = int(getattr(settings, "MANUAL_TRIP_CUSTOMER_TELEGRAM_ID", -910001001002))
+    row = await UserCRUD.get_by_telegram_id(db, fixed_tg)
+    if row:
+        if row.id == driver_user_id:
+            raise ValueError("manual_customer_is_driver")
+        return row.id
+
+    try:
+        created = await UserCRUD.create(
+            db,
+            UserCreate(telegram_id=fixed_tg, first_name="Manual", role=UserRole.USER),
+        )
+        if created.id == driver_user_id:
+            raise ValueError("manual_customer_is_driver")
+        return created.id
+    except IntegrityError:
+        await db.rollback()
+        row2 = await UserCRUD.get_by_telegram_id(db, fixed_tg)
+        if not row2:
+            raise
+        if row2.id == driver_user_id:
+            raise ValueError("manual_customer_is_driver")
+        return row2.id
 
 
 def is_web_active(driver_id: int) -> bool:
@@ -613,29 +744,28 @@ async def accept_order(callback: CallbackQuery):
                 raise
             
             logger.info(f"✅ Order {order_id} status: ACCEPTED")
-            
-            # TAXIMETER URL — token bilan xavfsiz (faqat bu haydovchi yangilashi mumkin)
-            from app.utils.webapp_token import generate_webapp_token
-            base_url = getattr(settings, "WEBAPP_BASE_URL", "https://candid-semiexposed-dung.ngrok-free.dev")
-            ts = int(time.time())
-            token = generate_webapp_token(order.id, driver.id)
-            webapp_url = f"{base_url}/taximeter_v2?order_id={order.id}&token={token}&t={ts}&v={ts}"
-            
-            logger.info(f"📱 Taximeter WebApp tugmasi URL: {webapp_url}")
-            
-            kb = InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(
-                    text=get_text(driver_ui_lang, "driver_btn_open_taximeter"),
-                    web_app=WebAppInfo(url=webapp_url)
-                )],
-                [InlineKeyboardButton(
-                    text=get_text(driver_ui_lang, "driver_btn_write_customer"),
-                    callback_data="driver_chat_tip",
-                )],
-            ])
+            kb = driver_taximeter_reply_markup(driver_ui_lang, order.id, driver.id, with_chat=True)
+            logger.info(f"📱 Taximeter WebApp tugmasi order_id={order.id}")
+
+            order_customer = await UserCRUD.get_by_id(db, order.user_id)
+            cust_phone = (
+                (getattr(order_customer, "phone", None) or "").strip()
+                if order_customer
+                else ""
+            ) or "N/A"
+            accept_body = get_text(driver_ui_lang, "driver_accept_order_body", order_id=order.id)
+            oid_marker = f"#{order.id}"
+            _lines_out: list[str] = []
+            _phone_inserted = False
+            for _ln in accept_body.split("\n"):
+                _lines_out.append(_ln)
+                if not _phone_inserted and _ln.startswith("📍") and oid_marker in _ln:
+                    _lines_out.append(f"📞 Mijoz: {cust_phone}")
+                    _phone_inserted = True
+            accept_text = "\n".join(_lines_out)
 
             await callback.message.edit_text(
-                get_text(driver_ui_lang, "driver_accept_order_body", order_id=order.id),
+                accept_text,
                 reply_markup=kb,
                 parse_mode="HTML",
             )
@@ -644,46 +774,10 @@ async def accept_order(callback: CallbackQuery):
 
             logger.info(f"✅ Driver {driver.id} buyurtma {order_id}ni qabul qildi")
 
-            # MIJOZGA XABAR + TRACKING TUGMASI
-            order_user = await UserCRUD.get_by_id(db, order.user_id)
+            await _notify_customer_driver_assigned(
+                callback.bot, db, order=order, driver=driver, driver_user=user
+            )
 
-            if order_user:
-                try:
-                    user_lang = normalize_bot_lang(getattr(order_user, "language_code", None) or "uz")
-                    base_url = getattr(settings, "WEBAPP_BASE_URL", "https://candid-semiexposed-dung.ngrok-free.dev")
-                    ts = int(time.time())
-                    tracking_url = f"{base_url}/tracking?order_id={order.id}&t={ts}"
-                    tracking_kb = InlineKeyboardMarkup(inline_keyboard=[
-                        [InlineKeyboardButton(
-                            text=get_text(user_lang, "track_driver"),
-                            web_app=WebAppInfo(url=tracking_url)
-                        )],
-                        [InlineKeyboardButton(
-                            text=get_text(user_lang, "user_btn_write_driver"),
-                            callback_data="user_chat_tip",
-                        )],
-                    ])
-                    driver_msg = (
-                        f"{get_text(user_lang, 'driver_found_title')}\n\n"
-                        f"👨‍✈️ {user.first_name}\n"
-                        f"🚗 {driver.car_model} ({driver.car_number})\n"
-                        f"📞 Haydovchi: {getattr(user, 'phone', None) or 'N/A'}\n"
-                        f"⭐️ {get_text(user_lang, 'rating_label')}: {driver.rating:.1f}/5.0\n\n"
-                        f"{get_text(user_lang, 'taxi_arriving')}\n"
-                        f"{get_text(user_lang, 'chat_via_bot')}"
-                    )
-                    sent_msg = await callback.bot.send_message(
-                        chat_id=order_user.telegram_id,
-                        text=driver_msg,
-                        reply_markup=tracking_kb,
-                        parse_mode="HTML",
-                    )
-                    order.user_tracking_message_id = sent_msg.message_id
-                    await db.commit()
-                    logger.info(f"✅ Mijozga xabar yuborildi (tracking mid={sent_msg.message_id})")
-                except Exception as e:
-                    logger.error(f"❌ Mijozga xabar yuborishda xato: {e}")
-            
     except Exception as e:
         logger.error(f"❌ Qabul qilishda xato: {e}")
         import traceback
@@ -889,6 +983,125 @@ async def go_offline(message: Message, lang: str = "uz"):
         logger.error(f"❌ Offline qilishda xato: {e}")
         import traceback
         logger.error(f"Traceback: {traceback.format_exc()}")
+        await message.answer(get_text(lang, "driver_err_generic_retry"))
+
+
+@driver_router.message(F.text.in_(DRIVER_OPEN_TAXIMETER_TEXTS))
+async def open_taximeter_manual(message: Message):
+    """Haydovchi panelidan: qo'lda Order + OrderCRUD + _ensure_trip_state_for_order_start (mavjud taksometr)."""
+    lang = "uz"
+    try:
+        async with AsyncSessionLocal() as db:
+            lang = await db_lang_for_telegram(db, message.from_user.id)
+            user = await UserCRUD.get_by_telegram_id(db, message.from_user.id)
+            driver_ui_lang = (
+                normalize_bot_lang(getattr(user, "language_code", None) or "uz") if user else "uz"
+            )
+            if not user:
+                await message.answer(get_text(lang, "driver_go_online_err_start"))
+                return
+            driver = await DriverCRUD.get_by_user_id(db, user.id)
+            if not driver:
+                await message.answer(get_text(lang, "driver_go_online_not_driver"))
+                return
+            if not getattr(driver, "is_active", True):
+                await message.answer(get_text(lang, "driver_blocked_panel"))
+                return
+
+            from app.crud.order_crud import OrderCRUD
+
+            ongoing = await OrderCRUD.get_ongoing_order_for_driver(db, driver.id)
+            if ongoing:
+                cur = (ongoing.status.value if hasattr(ongoing.status, "value") else ongoing.status) or ""
+                cur_l = str(cur).lower()
+                if cur_l in ("accepted", "in_progress"):
+                    r_ongoing = get_redis()
+                    if r_ongoing and cur_l == "in_progress":
+                        from app.api.routes.webapp import _ensure_trip_state_for_order_start
+
+                        await _ensure_trip_state_for_order_start(
+                            r_ongoing, ongoing.id, driver.id, db
+                        )
+                    kb = driver_taximeter_reply_markup(
+                        driver_ui_lang, ongoing.id, driver.id, with_chat=(cur_l == "accepted")
+                    )
+                    await message.answer(
+                        get_text(driver_ui_lang, "driver_manual_taximeter_active", order_id=ongoing.id),
+                        reply_markup=kb,
+                        parse_mode="HTML",
+                    )
+                return
+
+            from app.api.routes.webapp import _ensure_trip_state_for_order_start
+            from app.schemas.order import OrderCreate
+            from app.services.pricing_service import PricingService
+            from app.services.settings_service import get_settings, SettingsLoadError
+            from app.services.taximeter_service import compute_fare
+
+            try:
+                cust_uid = await _manual_order_customer_user_id(db, driver.user_id)
+            except ValueError as ve:
+                code = str(ve)
+                logger.error("open_taximeter_manual customer user: %s", code)
+                await message.answer(get_text(lang, "driver_err_generic_retry"))
+                return
+
+            try:
+                tariff = await get_settings(db)
+            except SettingsLoadError:
+                await message.answer(get_text(lang, "driver_err_generic_retry"))
+                return
+
+            lat = getattr(driver, "current_latitude", None)
+            lon = getattr(driver, "current_longitude", None)
+            if lat is None or lon is None:
+                lat, lon = 41.311081, 69.279737
+            lat_f, lon_f = float(lat), float(lon)
+
+            snap = PricingService.build_tariff_snapshot_from_settings(tariff)
+            estimated_price = float(compute_fare(snap, 0.0, 0))
+
+            oc = OrderCreate(
+                pickup_latitude=lat_f,
+                pickup_longitude=lon_f,
+                pickup_address="Manual",
+                destination_latitude=lat_f,
+                destination_longitude=lon_f,
+                estimated_price=estimated_price,
+                distance_km=0.0,
+            )
+            new_order = await OrderCRUD.create(db, cust_uid, oc)
+            await OrderCRUD.update_status(db, new_order.id, OrderStatus.ACCEPTED, driver_id=driver.id)
+            order_acc = await OrderCRUD.get_by_id(db, new_order.id)
+            if order_acc:
+                await _notify_customer_driver_assigned(
+                    message.bot, db, order=order_acc, driver=driver, driver_user=user
+                )
+            await OrderCRUD.update_status(
+                db,
+                new_order.id,
+                OrderStatus.IN_PROGRESS,
+                apply_taximeter_start=True,
+                trip_start_lat=lat_f,
+                trip_start_lon=lon_f,
+            )
+            r = get_redis()
+            if r:
+                await _ensure_trip_state_for_order_start(r, new_order.id, driver.id, db)
+
+            kb = driver_taximeter_reply_markup(
+                driver_ui_lang, new_order.id, driver.id, with_chat=False
+            )
+            await message.answer(
+                get_text(driver_ui_lang, "driver_manual_taximeter_ready", order_id=new_order.id),
+                reply_markup=kb,
+                parse_mode="HTML",
+            )
+    except Exception as e:
+        logger.error(f"open_taximeter_manual: {e}")
+        import traceback
+
+        logger.error(traceback.format_exc())
         await message.answer(get_text(lang, "driver_err_generic_retry"))
 
 

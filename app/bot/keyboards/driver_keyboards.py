@@ -18,7 +18,7 @@ def driver_keyboard_full(lang: str = "uz") -> ReplyKeyboardMarkup:
                 KeyboardButton(text=t("driver_btn_online")),
                 KeyboardButton(text=t("driver_btn_offline")),
             ],
-            [KeyboardButton(text=t("driver_btn_link_card"))],
+            [KeyboardButton(text=t("driver_btn_open_taximeter"))],
             [
                 KeyboardButton(text=t("driver_btn_group")),
                 KeyboardButton(text=t("driver_btn_balance")),
