@@ -28,7 +28,7 @@ from app.services.taximeter_service import (
     update_distance,
 )
 from app.services.trip_billing import compute_server_final_price_for_completion
-from app.models.order import Order, OrderStatus
+from app.models.order import Order, OrderStatus, order_skip_customer_notifications
 from app.core.logger import get_logger
 
 logger = get_logger(__name__)
@@ -439,7 +439,7 @@ async def update_order_status(
                 sent_driver = False
                 user_main_menu_sent = False
 
-                if user_telegram_id:
+                if user_telegram_id and not order_skip_customer_notifications(updated_order):
                     try:
                         from app.bot.tracking_message_cleanup import clear_user_tracking_message
 
@@ -532,6 +532,9 @@ async def driver_arrived(
             {"now": datetime.utcnow(), "oid": order_id}
         )
         await db.commit()
+
+        if order_skip_customer_notifications(order):
+            return JSONResponse({"ok": True})
 
         user_result = await db.execute(select(User).where(User.id == order.user_id))
         user = user_result.scalar_one_or_none()
@@ -883,6 +886,8 @@ async def update_driver_location_api(
 
     order = await OrderCRUD.get_active_order_for_driver(db, body.driver_id)
     if not order or not order.user_id:
+        return {"ok": True}
+    if order_skip_customer_notifications(order):
         return {"ok": True}
     if getattr(order, "is_near_notified", False):
         return {"ok": True}

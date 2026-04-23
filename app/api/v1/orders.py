@@ -20,7 +20,7 @@ from app.services.geo_service import GeoService
 from app.services.order_matching import start_matching_background_task
 from app.services.telegram_notifications import TelegramNotificationService
 from app.services.pricing_service import PricingService
-from app.models.order import OrderStatus
+from app.models.order import OrderStatus, order_skip_customer_notifications
 
 logger = get_logger(__name__)
 
@@ -120,15 +120,16 @@ async def accept_order(
     )
     driver_phone = getattr(drv_user, "phone", None) or "Noma'lum" if drv_user else "Noma'lum"
 
-    await notification_service.send_order_accepted_to_user(
-        user_id=order.user_id,
-        order_id=order.id,
-        driver_name=driver_name,
-        driver_phone=driver_phone,
-        car_model=current_driver.car_model,
-        car_number=current_driver.car_number,
-        rating=current_driver.rating,
-    )
+    if not order_skip_customer_notifications(order):
+        await notification_service.send_order_accepted_to_user(
+            user_id=order.user_id,
+            order_id=order.id,
+            driver_name=driver_name,
+            driver_phone=driver_phone,
+            car_model=current_driver.car_model,
+            car_number=current_driver.car_number,
+            rating=current_driver.rating,
+        )
 
     logger.info(
         "accept_order: order_id=%s driver_id=%s ip=%s",

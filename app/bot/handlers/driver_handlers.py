@@ -19,11 +19,11 @@ from app.core.redis import get_redis, get_trip_state, delete_trip_state
 from app.crud.user import UserCRUD, DriverCRUD
 from app.models.user import UserRole
 from app.schemas.user import UserCreate
-from app.models.order import Order, OrderStatus
+from app.models.order import Order, OrderStatus, order_skip_customer_notifications
 from app.core.logger import get_logger
 from app.core.config import settings
 from app.utils.distance import haversine_distance
-from sqlalchemy import text, select
+from sqlalchemy import text, select, update
 from sqlalchemy.exc import IntegrityError
 from app.services.taximeter_service import accumulate_order_distance_for_driver
 from app.bot.keyboards.driver_keyboards import (
@@ -94,6 +94,8 @@ async def _notify_customer_driver_assigned(
     driver_user,
 ) -> None:
     """Haydovchi biriktirilgach mijozga xabar + tracking (callback accept_order bilan bir xil yo'l)."""
+    if order_skip_customer_notifications(order):
+        return
     order_user = await UserCRUD.get_by_id(db, order.user_id)
     if not order_user:
         return
@@ -1071,6 +1073,11 @@ async def open_taximeter_manual(message: Message):
                 distance_km=0.0,
             )
             new_order = await OrderCRUD.create(db, cust_uid, oc)
+            await db.execute(
+                update(Order).where(Order.id == new_order.id).values(source="manual")
+            )
+            await db.commit()
+            await db.refresh(new_order)
             await OrderCRUD.update_status(db, new_order.id, OrderStatus.ACCEPTED, driver_id=driver.id)
             order_acc = await OrderCRUD.get_by_id(db, new_order.id)
             if order_acc:
@@ -1617,69 +1624,70 @@ async def finish_order(callback: CallbackQuery):
             await callback.message.edit_text(driver_msg, parse_mode="HTML")
 
             # 4. MIJOZGA: FSM holatini tozalash + chek + bosh menyu (explicit async - no order.user lazy load)
-            try:
-                from aiogram.fsm.storage.base import StorageKey
-                from app.bot.telegram_bot import bot as telegram_bot, dp
-                from app.bot.messages import get_text
-                from app.bot.keyboards.main_menu import get_main_keyboard
-
-                order_user = await UserCRUD.get_by_id(db, order.user_id) if order.user_id else None
-                customer_telegram_id = getattr(order_user, "telegram_id", None) if order_user else None
-                if not customer_telegram_id:
-                    raise ValueError("Mijoz telegram_id topilmadi")
-                # State reset: mijoz FSM holatini to'liq tozalab, bosh holatga qaytarish
+            if not order_skip_customer_notifications(order):
                 try:
-                    key = StorageKey(bot_id=telegram_bot.id, chat_id=customer_telegram_id, user_id=customer_telegram_id)
-                    user_fsm = FSMContext(storage=dp.storage, key=key)
-                    await user_fsm.clear()
-                except Exception as state_err:
-                    logger.warning(f"Mijoz FSM tozalashda xato: {state_err}")
+                    from aiogram.fsm.storage.base import StorageKey
+                    from app.bot.telegram_bot import bot as telegram_bot, dp
+                    from app.bot.messages import get_text
+                    from app.bot.keyboards.main_menu import get_main_keyboard
 
-                user_lang = normalize_bot_lang(getattr(order_user, "language_code", None) or "uz")
+                    order_user = await UserCRUD.get_by_id(db, order.user_id) if order.user_id else None
+                    customer_telegram_id = getattr(order_user, "telegram_id", None) if order_user else None
+                    if not customer_telegram_id:
+                        raise ValueError("Mijoz telegram_id topilmadi")
+                    # State reset: mijoz FSM holatini to'liq tozalab, bosh holatga qaytarish
+                    try:
+                        key = StorageKey(bot_id=telegram_bot.id, chat_id=customer_telegram_id, user_id=customer_telegram_id)
+                        user_fsm = FSMContext(storage=dp.storage, key=key)
+                        await user_fsm.clear()
+                    except Exception as state_err:
+                        logger.warning(f"Mijoz FSM tozalashda xato: {state_err}")
 
-                from app.bot.tracking_message_cleanup import clear_user_tracking_message
+                    user_lang = normalize_bot_lang(getattr(order_user, "language_code", None) or "uz")
 
-                tracking_mid = getattr(order, "user_tracking_message_id", None)
-                await clear_user_tracking_message(
-                    callback.bot, customer_telegram_id, tracking_mid
-                )
+                    from app.bot.tracking_message_cleanup import clear_user_tracking_message
 
-                msg = (
-                    get_text(user_lang, "arrived_at_dest")
-                    + "\n\n"
-                    + get_text(user_lang, "trip_finished_thanks")
-                    + "\n\n"
-                    + get_text(
-                        user_lang,
-                        "user_final_bill",
-                        payable=payable_str,
-                        used=used_str,
-                        earned=earned_str,
+                    tracking_mid = getattr(order, "user_tracking_message_id", None)
+                    await clear_user_tracking_message(
+                        callback.bot, customer_telegram_id, tracking_mid
                     )
-                    + "\n\n"
-                    + get_text(user_lang, "rate_driver")
-                )
-                await callback.bot.send_message(
-                    chat_id=customer_telegram_id,
-                    text=msg,
-                    reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                        [InlineKeyboardButton(text="⭐ 1", callback_data=f"rate:1:{order.id}"),
-                         InlineKeyboardButton(text="⭐ 2", callback_data=f"rate:2:{order.id}"),
-                         InlineKeyboardButton(text="⭐ 3", callback_data=f"rate:3:{order.id}"),
-                         InlineKeyboardButton(text="⭐ 4", callback_data=f"rate:4:{order.id}"),
-                         InlineKeyboardButton(text="⭐ 5", callback_data=f"rate:5:{order.id}")]
-                    ]),
-                    parse_mode="HTML"
-                )
-                # Bosh menyu tugmalarini yuborish (Taksi chaqirish, Buyurtmalarim va hokazo)
-                main_kb = get_main_keyboard(user_lang)
-                await callback.bot.send_message(
-                    chat_id=customer_telegram_id,
-                    text=get_text(user_lang, "order_cancel_success"),
-                    reply_markup=main_kb
-                )
-            except Exception as e:
-                logger.error(f"Mijozga yakuniy xabar yuborishda xato: {e}")
+
+                    msg = (
+                        get_text(user_lang, "arrived_at_dest")
+                        + "\n\n"
+                        + get_text(user_lang, "trip_finished_thanks")
+                        + "\n\n"
+                        + get_text(
+                            user_lang,
+                            "user_final_bill",
+                            payable=payable_str,
+                            used=used_str,
+                            earned=earned_str,
+                        )
+                        + "\n\n"
+                        + get_text(user_lang, "rate_driver")
+                    )
+                    await callback.bot.send_message(
+                        chat_id=customer_telegram_id,
+                        text=msg,
+                        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                            [InlineKeyboardButton(text="⭐ 1", callback_data=f"rate:1:{order.id}"),
+                             InlineKeyboardButton(text="⭐ 2", callback_data=f"rate:2:{order.id}"),
+                             InlineKeyboardButton(text="⭐ 3", callback_data=f"rate:3:{order.id}"),
+                             InlineKeyboardButton(text="⭐ 4", callback_data=f"rate:4:{order.id}"),
+                             InlineKeyboardButton(text="⭐ 5", callback_data=f"rate:5:{order.id}")]
+                        ]),
+                        parse_mode="HTML"
+                    )
+                    # Bosh menyu tugmalarini yuborish (Taksi chaqirish, Buyurtmalarim va hokazo)
+                    main_kb = get_main_keyboard(user_lang)
+                    await callback.bot.send_message(
+                        chat_id=customer_telegram_id,
+                        text=get_text(user_lang, "order_cancel_success"),
+                        reply_markup=main_kb
+                    )
+                except Exception as e:
+                    logger.error(f"Mijozga yakuniy xabar yuborishda xato: {e}")
 
             await callback.answer(get_text(fin_lang, "trip_completed_check"))
 

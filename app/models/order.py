@@ -32,7 +32,9 @@ class Order(Base):
     pickup_latitude: Mapped[float] = mapped_column(Float, nullable=False)
     pickup_longitude: Mapped[float] = mapped_column(Float, nullable=False)
     pickup_address: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
-    
+    # "manual" = haydovchi panelidan qo'lda taksometr (placeholder mijoz — Telegram xabarlarni o'tkazish)
+    source: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
+
     destination_latitude: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     destination_longitude: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     destination_address: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
@@ -78,3 +80,8 @@ class Order(Base):
 
     user: Mapped["User"] = relationship("User", back_populates="orders", lazy="selectin")
     driver: Mapped[Optional["Driver"]] = relationship("Driver", back_populates="orders", lazy="selectin")
+
+
+def order_skip_customer_notifications(order: Any) -> bool:
+    """Qo'lda (manual) buyurtmalar — mijozga Telegram xabar yubormaslik."""
+    return getattr(order, "source", None) == "manual"

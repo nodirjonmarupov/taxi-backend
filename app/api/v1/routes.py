@@ -38,7 +38,7 @@ from app.schemas.order import (
 )
 from app.services.matching import DriverMatchingService
 from app.services.trip import TripService
-from app.models.order import Order, OrderStatus
+from app.models.order import Order, OrderStatus, order_skip_customer_notifications
 from app.models.user import User, Driver
 from app.core.logger import get_logger
 
@@ -164,15 +164,16 @@ async def accept_order(
     )
     driver_phone = getattr(drv_user, "phone", None) or "Noma'lum" if drv_user else "Noma'lum"
 
-    await notification_service.send_order_accepted_to_user(
-        user_id=order.user_id,
-        order_id=order.id,
-        driver_name=driver_name,
-        driver_phone=driver_phone,
-        car_model=current_driver.car_model,
-        car_number=current_driver.car_number,
-        rating=current_driver.rating,
-    )
+    if not order_skip_customer_notifications(order):
+        await notification_service.send_order_accepted_to_user(
+            user_id=order.user_id,
+            order_id=order.id,
+            driver_name=driver_name,
+            driver_phone=driver_phone,
+            car_model=current_driver.car_model,
+            car_number=current_driver.car_number,
+            rating=current_driver.rating,
+        )
 
     logger.info(
         "accept_order: order_id=%s driver_id=%s ip=%s",
