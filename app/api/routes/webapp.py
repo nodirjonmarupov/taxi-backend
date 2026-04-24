@@ -3,6 +3,7 @@ WebApp API routes
 """
 import json
 import time
+import httpx
 from pathlib import Path
 from typing import Optional, Any
 from datetime import datetime
@@ -30,6 +31,7 @@ from app.services.taximeter_service import (
 from app.services.trip_billing import compute_server_final_price_for_completion
 from app.models.order import Order, OrderStatus, order_skip_customer_notifications
 from app.core.logger import get_logger
+from app.utils.google_polyline import decode_google_polyline
 
 logger = get_logger(__name__)
 
@@ -224,6 +226,100 @@ async def get_order_for_webapp(
     except Exception as e:
         logger.error(f"❌ Order GET xatosi: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/order/{order_id}/driving-directions")
+async def driving_directions(
+    order_id: int,
+    origin_lat: float = Query(...),
+    origin_lng: float = Query(...),
+    dest_lat: float = Query(...),
+    dest_lng: float = Query(...),
+    token: Optional[str] = Header(None, alias="X-WebApp-Token"),
+    qtoken: Optional[str] = Query(None, alias="token"),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Google Directions JSON (server proxy — mijoz brauzeridan to'g'ridan-to'g'ri chaqirolmaydi CORS sababli).
+    Redis / compute_fare / trip_state ga tegmaydi.
+    """
+    t = token or qtoken
+    if not t:
+        raise HTTPException(status_code=403, detail="WebApp token required")
+    data_tok = verify_webapp_token(t, order_id)
+    if not data_tok:
+        raise HTTPException(status_code=403, detail="Invalid or expired WebApp token")
+    _, driver_id = data_tok
+
+    order = await OrderCRUD.get_by_id(db, order_id)
+    if not order:
+        raise HTTPException(status_code=404, detail="Order not found")
+    if getattr(order, "driver_id", None) != driver_id:
+        raise HTTPException(status_code=403, detail="Access denied: not your order")
+
+    for la, lo in ((origin_lat, origin_lng), (dest_lat, dest_lng)):
+        if not _valid_coord(float(la), float(lo)):
+            return {"ok": False, "error": "invalid_coordinates", "coordinates": [], "distance_km": 0.0, "instructions": []}
+
+    api_key = (getattr(settings, "GOOGLE_DIRECTIONS_API_KEY", None) or "").strip()
+    if not api_key:
+        logger.warning("driving_directions: GOOGLE_DIRECTIONS_API_KEY bo'sh")
+        return {"ok": False, "error": "directions_not_configured", "coordinates": [], "distance_km": 0.0, "instructions": []}
+
+    params = {
+        "origin": f"{origin_lat},{origin_lng}",
+        "destination": f"{dest_lat},{dest_lng}",
+        "mode": "driving",
+        "key": api_key,
+    }
+    try:
+        async with httpx.AsyncClient(timeout=12.0) as client:
+            resp = await client.get(
+                "https://maps.googleapis.com/maps/api/directions/json",
+                params=params,
+            )
+        g = resp.json()
+    except Exception as e:
+        logger.error("driving_directions httpx: %s", e)
+        return {"ok": False, "error": "upstream_failed", "coordinates": [], "distance_km": 0.0, "instructions": []}
+
+    st = (g.get("status") or "").upper()
+    if st != "OK" or not g.get("routes"):
+        logger.info("driving_directions Google status=%s", st)
+        return {"ok": False, "error": st.lower(), "coordinates": [], "distance_km": 0.0, "instructions": []}
+
+    route0 = g["routes"][0]
+    overview = (route0.get("overview_polyline") or {}).get("points")
+    if not overview:
+        return {"ok": False, "error": "no_polyline", "coordinates": [], "distance_km": 0.0, "instructions": []}
+
+    latlng_pairs = decode_google_polyline(overview)
+    # JS Turf: [[lng, lat], ...]
+    coordinates = [[float(lng), float(lat)] for lat, lng in latlng_pairs]
+
+    distance_m = 0
+    instructions: list[dict[str, Any]] = []
+    step_idx = 0
+    for leg in route0.get("legs") or []:
+        try:
+            distance_m += int(leg.get("distance", {}).get("value", 0))
+        except (TypeError, ValueError):
+            pass
+        for step in leg.get("steps") or []:
+            txt = step.get("html_instructions") or step.get("maneuver") or ""
+            if isinstance(txt, dict):
+                txt = str(txt)
+            instructions.append({"text": str(txt)[:500], "type": -1, "index": step_idx})
+            step_idx += 1
+
+    distance_km = float(distance_m) / 1000.0 if distance_m else 0.0
+    return {
+        "ok": True,
+        "coordinates": coordinates,
+        "distance_km": distance_km,
+        "instructions": instructions,
+    }
+
 
 def _validate_status_transition(current: str, new_status: str, mapped: Any) -> None:
     """Status o'tishini tekshirish. Noto'g'ri bo'lsa HTTPException."""

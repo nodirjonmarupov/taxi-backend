@@ -133,6 +133,16 @@ class Settings(BaseSettings):
         description="Reserved telegram_id for auto-created placeholder customer user (manual taximeter).",
     )
 
+    # Taximeter WebApp: server-side Google Directions (browser CORS blocks direct calls)
+    GOOGLE_DIRECTIONS_API_KEY: str = Field(
+        default="",
+        description="Google Maps Directions API key for /api/webapp/order/.../driving-directions proxy.",
+    )
+    GOOGLE_MAPS_JS_KEY: str = Field(
+        default="",
+        description="Google Maps JavaScript API key for taximeter map tiles (injected into index.html).",
+    )
+
 
 # Global settings instance
 settings = Settings()

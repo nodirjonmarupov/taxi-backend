@@ -717,7 +717,12 @@ async def get_taximeter_v2(order_id: str = "0"):
     # #endregion
     if not _TAXIMETER_TEMPLATE.exists():
         return HTMLResponse("404: taximeter template not found", status_code=404)
-    html = _TAXIMETER_TEMPLATE.read_text(encoding="utf-8").replace("__WEBAPP_BASE_URL__", base_url)
+    gm_key = (getattr(settings, "GOOGLE_MAPS_JS_KEY", None) or "").strip()
+    html = (
+        _TAXIMETER_TEMPLATE.read_text(encoding="utf-8")
+        .replace("__WEBAPP_BASE_URL__", base_url)
+        .replace("__GOOGLE_MAPS_JS_KEY__", gm_key)
+    )
     return HTMLResponse(html)
 
 @app.get("/track", response_class=HTMLResponse)
