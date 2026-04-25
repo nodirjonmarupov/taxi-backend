@@ -531,19 +531,26 @@ function mapEaseToCamera(opts) {
 function updateCamera(lat, lng, heading) {
     if (!map || !_mapsJsReady()) return;
 
+    // smooth follow (keep existing smoothing vars)
     if (_camLat === null) {
         _camLat = lat;
         _camLng = lng;
     }
 
-    // smooth follow (lerp)
     _camLat += (lat - _camLat) * 0.15;
     _camLng += (lng - _camLng) * 0.15;
 
-    map.setCenter({ lat: _camLat, lng: _camLng });
+    // 🔥 forward offset (REAL 3D effect)
+    var offset = 0.0008;
+    var rad = heading * Math.PI / 180;
+
+    var camLat = _camLat + Math.cos(rad) * offset;
+    var camLng = _camLng + Math.sin(rad) * offset;
+
+    map.setCenter({ lat: camLat, lng: camLng });
 
     try { map.setHeading(heading); } catch (_) {}
-    try { map.setTilt(45); } catch (_) {}
+    try { map.setTilt(60); } catch (_) {}
 }
 /** Backend / _driverRouteCoords: [[lng, lat], ...] -> path for google.maps.Polyline */
 function pathLatLngFromLngLatPairs(coordsLL) {
