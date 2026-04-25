@@ -513,6 +513,15 @@ function initGoogleMap(initialLat, initialLng) {
         heading: 0,
         isFractionalZoomEnabled: true
     });
+    // Attempt to hide POIs/transit. In VECTOR mode this may be ignored (acceptable).
+    try {
+        map.setOptions({
+            styles: [
+                { featureType: 'poi', stylers: [{ visibility: 'off' }] },
+                { featureType: 'transit', stylers: [{ visibility: 'off' }] }
+            ]
+        });
+    } catch (e) { console.warn('map.setOptions(styles) failed', e); }
     google.maps.event.addListenerOnce(map, 'tilesloaded', function() {
         try { map.setTilt(45); } catch (e) { console.warn('map.setTilt failed (tilesloaded)', e); }
     });
@@ -950,15 +959,18 @@ function renderLoop() {
         var _brgShortcut = ((targetBearing - displayBearing + 540) % 360) - 180;
         displayBearing = (displayBearing + _brgShortcut * (1 - _brgDecay) + 360) % 360;
 
-        // Arrow heading: adaptive tau to reduce low-speed jitter.
-        var _tauHead = spd < 5 ? 0.25 : spd < 20 ? 0.15 : 0.10;
+        // Arrow heading: fast when actually moving (even if GPS spd is noisy).
+        var _moveMHead = (dLat != null && dLng != null && _lastDbgLat != null && _lastDbgLng != null)
+            ? haversineM(dLat, dLng, _lastDbgLat, _lastDbgLng) : 0;
+        var _isMovingHead = (spd >= 3) || (_moveMHead > 1);
+        var _tauHead = _isMovingHead ? 0.08 : 0.25;
         var _headDecay = Math.exp(-dt / _tauHead);
         var _hdShortcut = ((brg - displayHeading + 540) % 360) - 180;
         displayHeading = (displayHeading + _hdShortcut * (1 - _headDecay) + 360) % 360;
         console.log(
             '[FRAME]',
             'spd=', spd,
-            'move(m)=', (dLat != null && dLng != null && _lastDbgLat != null && _lastDbgLng != null ? haversineM(dLat, dLng, _lastDbgLat, _lastDbgLng).toFixed(2) : 'na'),
+            'move(m)=', (_lastDbgLat != null ? _moveMHead.toFixed(2) : 'na'),
             'brg=', (typeof brg === 'number' ? brg.toFixed(1) : 'na'),
             'head=', (typeof displayHeading === 'number' ? displayHeading.toFixed(1) : 'na'),
             'anchor=', _routeAnchorIdx
@@ -1022,8 +1034,9 @@ function renderLoop() {
                 ? haversineM(dLat, dLng, _lastCamLat, _lastCamLng) : 999;
             var _moved = _moveDist > 1;
             var _zoomDelta = Math.abs(_zoom - _lastCamZoom);
+            var _timeForced = (_nowMs - _lastCamUpdate > 500);
             if ((_nowMs - _lastCamUpdate > 130) &&
-                (_moved || _brgDelta > 2 || _zoomDelta > 0.1)) {
+                (_moved || _brgDelta > 2 || _zoomDelta > 0.1 || _timeForced)) {
                 if (Date.now() >= _camBlockUntil) {
                     var currentHeading = displayHeading;
                     if (!_moved) {
@@ -1328,7 +1341,9 @@ function initMap() {
         return;
     }
 
-    google.maps.event.addListener(map, 'dragstart', function() { _temporarilyDisableFollow(5000); });
+    // IMPORTANT: Do not use map 'dragstart' for follow blocking during navigation.
+    // On some devices it can fire during programmatic camera updates and permanently block the camera.
+    // We only block follow on direct user touch/pointer interaction (see setupMapGestures()).
 
     google.maps.event.addListenerOnce(map, 'idle', function() {
         try {
