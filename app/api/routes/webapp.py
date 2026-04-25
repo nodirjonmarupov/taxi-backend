@@ -264,7 +264,7 @@ async def driving_directions(
     osrm_url = (
         "https://router.project-osrm.org/route/v1/driving/"
         f"{float(origin_lng)},{float(origin_lat)};{float(dest_lng)},{float(dest_lat)}"
-        "?overview=full&geometries=geojson"
+        "?overview=full&geometries=geojson&steps=true&annotations=true"
     )
     try:
         async with httpx.AsyncClient(timeout=12.0) as client:

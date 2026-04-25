@@ -16,12 +16,15 @@ const tg = (window.Telegram && window.Telegram.WebApp) ? window.Telegram.WebApp 
 
 let map, driverMarker, clientMarker, destMarker;
 let _gRoutePolyline = null;
+let _gRouteShadow = null;
 let _gRouteAbPolyline = null;
 let routeRoadDistanceKm = null;
 let routeInstructions = [], routeCoordinates = [];
 // Turf route line feature (haydovchi uchun snapping va progressive trim)
 let _driverRouteLine = null;       // turf.lineString ??[lon,lat] koordinatlarda
 let _driverRouteCoords = [];       // [[lon,lat], ...] — route polyline (GeoJSON tartib)
+let _smoothedRouteCoords = null;
+let _routeHash = null;
 let arrowEl = null;
 let tLat = null, tLng = null, dLat = null, dLng = null, brg = 0, spd = 0;
 let pLat = null, pLng = null, locked = true;
@@ -30,6 +33,8 @@ let displayBearing = 0, targetBearing = 0;
 let displayHeading = 0;
 let _camBlockUntil = 0;
 let _lastCamLat = null, _lastCamLng = null, _lastCamBrg = 0, _lastCamZoom = 0;
+let _camLat = null;
+let _camLng = null;
 let _lastCamUpdate = 0;
 let _velLat = 0, _velLng = 0;
 let _smoothVelLat = 0, _smoothVelLng = 0;
@@ -518,10 +523,27 @@ function mapEaseToCamera(opts) {
         try { if (opts.pitch != null) map.setTilt(opts.pitch); } catch (_) {}
         return;
     }
-    map.panTo(ll);
+    map.setCenter(ll);
     if (opts.zoom != null) map.setZoom(opts.zoom);
     try { if (opts.bearing != null) map.setHeading(opts.bearing); } catch (_) {}
     try { if (opts.pitch != null) map.setTilt(opts.pitch); } catch (_) {}
+}
+function updateCamera(lat, lng, heading) {
+    if (!map || !_mapsJsReady()) return;
+
+    if (_camLat === null) {
+        _camLat = lat;
+        _camLng = lng;
+    }
+
+    // smooth follow (lerp)
+    _camLat += (lat - _camLat) * 0.15;
+    _camLng += (lng - _camLng) * 0.15;
+
+    map.setCenter({ lat: _camLat, lng: _camLng });
+
+    try { map.setHeading(heading); } catch (_) {}
+    try { map.setTilt(45); } catch (_) {}
 }
 /** Backend / _driverRouteCoords: [[lng, lat], ...] -> path for google.maps.Polyline */
 function pathLatLngFromLngLatPairs(coordsLL) {
@@ -538,19 +560,55 @@ function pathLatLngFromLngLatPairs(coordsLL) {
 }
 function setMainRoutePolylineFromDriverCoords() {
     if (!_driverRouteCoords || _driverRouteCoords.length < 2) return;
-    var path = pathLatLngFromLngLatPairs(_driverRouteCoords);
+    if (!_smoothedRouteCoords || _smoothedRouteCoords.length !== _driverRouteCoords.length) {
+        _smoothedRouteCoords = smoothCoords(_driverRouteCoords, 2);
+    }
+    var path = pathLatLngFromLngLatPairs(_smoothedRouteCoords);
     if (path.length) setGoogleRoutePolyline(path);
+}
+function smoothCoords(coords, factor) {
+    var out = [];
+    for (var i = 0; i < coords.length - 1; i++) {
+        var a = coords[i];
+        var b = coords[i + 1];
+
+        out.push(a);
+
+        for (var t = 1; t <= factor; t++) {
+            var ratio = t / (factor + 1);
+            out.push([
+                a[0] + (b[0] - a[0]) * ratio,
+                a[1] + (b[1] - a[1]) * ratio
+            ]);
+        }
+    }
+    out.push(coords[coords.length - 1]);
+    return out;
 }
 function setGoogleRoutePolyline(path) {
     if (!map || !_mapsJsReady() || !path || !path.length) return;
     if (!_gRoutePolyline) {
+        _gRouteShadow = new google.maps.Polyline({
+            path: path,
+            map: map,
+            strokeColor: '#000000',
+            strokeOpacity: 0.25,
+            strokeWeight: 10,
+            geodesic: true
+        });
         _gRoutePolyline = new google.maps.Polyline({
             path: path,
             map: map,
+            geodesic: true,
             strokeColor: '#FFD600',
-            strokeWeight: 5
+            strokeWeight: 6,
+            strokeOpacity: 0.9
         });
     } else {
+        if (_gRouteShadow) {
+            _gRouteShadow.setPath(path);
+            _gRouteShadow.setMap(map);
+        }
         _gRoutePolyline.setPath(path);
         _gRoutePolyline.setMap(map);
     }
@@ -924,13 +982,13 @@ function renderLoop() {
             if ((_nowMs - _lastCamUpdate > 130) &&
                 (_moved || _brgDelta > 2 || _zoomDelta > 0.1)) {
                 if (Date.now() >= _camBlockUntil) {
-                    mapEaseToCamera({
-                        center: [dLng, dLat],
-                        bearing: displayBearing,
-                        pitch: 60,
-                        zoom: _zoom,
-                        duration: 650
-                    });
+                    var currentHeading = displayBearing;
+                    if (_lastCamLat != null && _lastCamLng != null) {
+                        var deltaLat = dLat - _lastCamLat;
+                        var deltaLng = dLng - _lastCamLng;
+                        currentHeading = (Math.atan2(deltaLng, deltaLat) * 180 / Math.PI + 360) % 360;
+                    }
+                    updateCamera(dLat, dLng, currentHeading);
 
                     _lastCamLat = dLat;
                     _lastCamLng = dLng;
@@ -1960,6 +2018,13 @@ function drawRoute(from, to, opts) {
             }).filter(function(c) {
                 return !isNaN(c[0]) && !isNaN(c[1]) && isValidCoord(c[1], c[0]);
             });
+            var newHash = _driverRouteCoords.length + ':' +
+                (_driverRouteCoords.length ? _driverRouteCoords[0] : '') + ':' +
+                (_driverRouteCoords.length ? _driverRouteCoords[_driverRouteCoords.length - 1] : '');
+            if (_routeHash !== newHash) {
+                _smoothedRouteCoords = null;
+                _routeHash = newHash;
+            }
             routeCoordinates = _driverRouteCoords.map(function(c) { return [c[1], c[0]]; }); // [lat,lng]
             resetRouteProgress();
             if (!routeCoordinates.length || _driverRouteCoords.length < 2) {
