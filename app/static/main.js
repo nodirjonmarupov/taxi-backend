@@ -990,11 +990,6 @@ function renderLoop() {
                 (_moved || _brgDelta > 2 || _zoomDelta > 0.1)) {
                 if (Date.now() >= _camBlockUntil) {
                     var currentHeading = displayBearing;
-                    if (_lastCamLat != null && _lastCamLng != null) {
-                        var deltaLat = dLat - _lastCamLat;
-                        var deltaLng = dLng - _lastCamLng;
-                        currentHeading = (Math.atan2(deltaLng, deltaLat) * 180 / Math.PI + 360) % 360;
-                    }
                     updateCamera(dLat, dLng, currentHeading);
 
                     _lastCamLat = dLat;
