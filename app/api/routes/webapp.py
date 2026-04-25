@@ -2,6 +2,7 @@
 WebApp API routes
 """
 import json
+import re
 import time
 import httpx
 from pathlib import Path
@@ -74,6 +75,12 @@ def _parse_coords(lat, lon):
 def _sanitize_distance(km) -> float:
     """1000 km dan oshsa 0 (ngrok/IP xato koordinata)"""
     return sanitize_distance_km(km)
+
+
+def _strip_html_instructions(s: str) -> str:
+    t = re.sub(r"<[^>]+>", " ", s or "")
+    t = re.sub(r"\s+", " ", t).strip()
+    return t
 
 
 def _tariff_snapshot_from_settings(s, at: Optional[datetime] = None) -> dict:
@@ -266,103 +273,68 @@ async def driving_directions(
         logger.warning("driving_directions: GOOGLE_DIRECTIONS_API_KEY bo'sh")
         return {"ok": False, "error": "directions_not_configured", "coordinates": [], "distance_km": 0.0, "instructions": []}
 
-    # Routes API (v2) — legacy /maps/api/directions/json is not enabled for new projects
-    req_body: dict[str, Any] = {
-        "origin": {
-            "location": {
-                "latLng": {
-                    "latitude": float(origin_lat),
-                    "longitude": float(origin_lng),
-                }
-            }
-        },
-        "destination": {
-            "location": {
-                "latLng": {
-                    "latitude": float(dest_lat),
-                    "longitude": float(dest_lng),
-                }
-            }
-        },
-        "travelMode": "DRIVE",
-    }
-    routes_headers = {
-        "Content-Type": "application/json",
-        "X-Goog-Api-Key": api_key,
-        "X-Goog-FieldMask": (
-            "routes.duration,routes.distanceMeters,routes.polyline.encodedPolyline,routes.legs"
-        ),
+    params = {
+        "origin": f"{float(origin_lat)},{float(origin_lng)}",
+        "destination": f"{float(dest_lat)},{float(dest_lng)}",
+        "key": api_key,
     }
     try:
         async with httpx.AsyncClient(timeout=12.0) as client:
-            resp = await client.post(
-                "https://routes.googleapis.com/directions/v2:computeRoutes",
-                headers=routes_headers,
-                json=req_body,
+            resp = await client.get(
+                "https://maps.googleapis.com/maps/api/directions/json",
+                params=params,
             )
             g = resp.json()
     except Exception as e:
         logger.error("driving_directions httpx: %s", e)
         return {"ok": False, "error": "upstream_failed", "coordinates": [], "distance_km": 0.0, "instructions": []}
 
-    if resp.status_code != 200 or g.get("error"):
-        status_log = f"HTTP_{resp.status_code}"
-        if g.get("error") and isinstance(g.get("error"), dict):
-            status_log = str((g.get("error") or {}).get("message", status_log))[:200]
-        logger.error(f"Google Routes error: {g}")
-        logger.info(f"driving_directions Google status={status_log}")
+    if resp.status_code != 200:
+        logger.error("Directions API HTTP %s: %s", resp.status_code, g)
+        return {"ok": False, "error": "no_route", "coordinates": [], "distance_km": 0.0, "instructions": []}
+
+    status = (g.get("status") or "").strip()
+    logger.info(f"Directions API status={status}")
+    if status != "OK":
+        logger.error("Directions API full response: %s", json.dumps(g, default=str))
         return {"ok": False, "error": "no_route", "coordinates": [], "distance_km": 0.0, "instructions": []}
 
     routes = g.get("routes")
     if not routes:
-        logger.error(f"Google Routes no routes: {g}")
-        logger.info("driving_directions Google status=NO_ROUTES")
+        logger.error("Directions API status=OK but no routes: %s", json.dumps(g, default=str))
         return {"ok": False, "error": "no_route", "coordinates": [], "distance_km": 0.0, "instructions": []}
 
     route0 = routes[0]
-    enc = (route0.get("polyline") or {}).get("encodedPolyline")
+    enc = (route0.get("overview_polyline") or {}).get("points")
     if not enc:
-        logger.error(f"Google Routes missing polyline: {g}")
-        logger.info("driving_directions Google status=NO_POLYLINE")
+        logger.error("Directions API missing overview polyline: %s", json.dumps(g, default=str))
         return {"ok": False, "error": "no_route", "coordinates": [], "distance_km": 0.0, "instructions": []}
 
     latlng_pairs = decode_google_polyline(enc)
-    # JS Turf: [[lng, lat], ...]
+    # JS / Turf: [[lng, lat], ...] (unchanged)
     coordinates = [[float(lng), float(lat)] for lat, lng in latlng_pairs]
 
     distance_m = 0
-    try:
-        if route0.get("distanceMeters") is not None:
-            distance_m = int(route0.get("distanceMeters") or 0)
-    except (TypeError, ValueError):
-        pass
-    if not distance_m:
-        for leg in route0.get("legs") or []:
-            try:
-                if leg.get("distanceMeters") is not None:
-                    distance_m += int(leg.get("distanceMeters") or 0)
-            except (TypeError, ValueError):
-                pass
+    for leg in route0.get("legs") or []:
+        dist = (leg or {}).get("distance") or {}
+        try:
+            if dist.get("value") is not None:
+                distance_m += int(dist.get("value") or 0)
+        except (TypeError, ValueError):
+            pass
     distance_km = float(distance_m) / 1000.0 if distance_m else 0.0
 
     instructions: list[dict[str, Any]] = []
     step_idx = 0
     for leg in route0.get("legs") or []:
-        for step in leg.get("steps") or []:
-            ni = step.get("navigationInstruction") if isinstance(step, dict) else None
-            txt: str
-            if isinstance(ni, dict):
-                raw = (
-                    ni.get("instructions")
-                    or ni.get("maneuver")
-                )
-                txt = str(raw) if raw is not None else ""
-            else:
-                txt = ""
+        for step in (leg or {}).get("steps") or []:
+            if not isinstance(step, dict):
+                continue
+            raw = step.get("html_instructions")
+            txt = _strip_html_instructions(str(raw) if raw is not None else "")
             instructions.append({"text": str(txt)[:500], "type": -1, "index": step_idx})
             step_idx += 1
 
-    logger.info("driving_directions Google status=OK")
     return {
         "ok": True,
         "coordinates": coordinates,
