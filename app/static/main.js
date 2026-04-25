@@ -40,6 +40,7 @@ let _velLat = 0, _velLng = 0;
 let _smoothVelLat = 0, _smoothVelLng = 0;
 let _gpsAnchorLat = null, _gpsAnchorLng = null, _gpsAnchorMs = 0;
 let _predLat = null, _predLng = null;
+let _followMode = true;
 let _routeAnchorIdx = 0;
 let _currentInstructionIndex = 0; // next maneuver in routeInstructions; only advances forward
 let _stableZoom = null; // EMA-smoothed zoom; prevents per-frame flicker at speed boundaries
@@ -510,6 +511,7 @@ function mapResize() {
     }
 }
 function mapEaseToCamera(opts) {
+    if (_followMode) return;   // disable during navigation
     if (!map || !_mapsJsReady()) return;
     var c = opts.center;
     var lat = Array.isArray(c) ? c[1] : c.lat;
@@ -531,19 +533,40 @@ function mapEaseToCamera(opts) {
 function updateCamera(lat, lng, heading) {
     if (!map || !_mapsJsReady()) return;
 
-    // smooth follow (keep existing smoothing vars)
     if (_camLat === null) {
         _camLat = lat;
         _camLng = lng;
     }
 
-    _camLat += (lat - _camLat) * 0.15;
-    _camLng += (lng - _camLng) * 0.15;
+    // smooth follow
+    _camLat += (lat - _camLat) * 0.12;
+    _camLng += (lng - _camLng) * 0.12;
 
-    map.setCenter({ lat: _camLat, lng: _camLng });
+    // forward offset (stable, small)
+    var z = map.getZoom ? map.getZoom() : 17;
+
+    var offset =
+        z >= 18 ? 0.0003 :
+        z >= 17 ? 0.0004 :
+                  0.0006;
+
+    if (typeof _lastCamBrg === 'number') {
+        var d = heading - _lastCamBrg;
+        d = ((d + 540) % 360) - 180; // normalize to [-180..180]
+
+        if (Math.abs(d) < 1.5) {
+            heading = _lastCamBrg;
+        }
+    }
+    var rad = heading * Math.PI / 180;
+
+    var camLat = _camLat + Math.cos(rad) * offset;
+    var camLng = _camLng + Math.sin(rad) * offset;
+
+    map.setCenter({ lat: camLat, lng: camLng });
 
     try { map.setHeading(heading); } catch (_) {}
-    try { map.setTilt(0); } catch (_) {}
+    try { map.setTilt(45); } catch (_) {}
 }
 /** Backend / _driverRouteCoords: [[lng, lat], ...] -> path for google.maps.Polyline */
 function pathLatLngFromLngLatPairs(coordsLL) {
@@ -943,7 +966,21 @@ function renderLoop() {
                                 }
                             }
 
-                            _routeAnchorIdx = _newIdx;
+                            if (_routeAnchorIdx == null) {
+                                _routeAnchorIdx = _newIdx;
+                            } else {
+                                var diff = Math.abs(_newIdx - _routeAnchorIdx);
+
+                                // only allow small forward movement
+                                if (_newIdx >= _routeAnchorIdx && diff <= 3) {
+                                    _routeAnchorIdx = _newIdx;
+                                }
+                                // ignore backward or big jumps (GPS noise)
+                            }
+                            if (_newIdx < _routeAnchorIdx) {
+                                // ignore backward movement
+                                _newIdx = _routeAnchorIdx;
+                            }
                             console.log('[ANCHOR UPDATE]', _routeAnchorIdx);
                         }
                     } catch (_) {}
@@ -983,7 +1020,14 @@ function renderLoop() {
                 (_moved || _brgDelta > 2 || _zoomDelta > 0.1)) {
                 if (Date.now() >= _camBlockUntil) {
                     var currentHeading = displayBearing;
+                    if (!_moved) {
+                        currentHeading = _lastCamBrg || currentHeading;
+                    }
+                    if (map.getZoom && map.getZoom() < 17) {
+                        map.setZoom(17);
+                    }
                     updateCamera(dLat, dLng, currentHeading);
+                    _lastCamBrg = currentHeading;
 
                     _lastCamLat = dLat;
                     _lastCamLng = dLng;
