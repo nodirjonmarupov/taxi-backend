@@ -500,7 +500,32 @@ function initGoogleMap(initialLat, initialLng) {
         disableDefaultUI: true,
         gestureHandling: 'greedy',
         clickableIcons: false,
-        mapTypeId: 'roadmap'
+        mapTypeId: 'roadmap',
+        styles: [
+            // Base: light beige background, minimal clutter.
+            { elementType: 'geometry', stylers: [{ color: '#F5F3EF' }] },
+            { elementType: 'labels.icon', stylers: [{ visibility: 'off' }] },
+            { elementType: 'labels.text.fill', stylers: [{ color: '#6B6B6B' }] },
+            { elementType: 'labels.text.stroke', stylers: [{ color: '#F5F3EF' }] },
+
+            // Roads: white with subtle gray borders.
+            { featureType: 'road', elementType: 'geometry', stylers: [{ color: '#FFFFFF' }] },
+            { featureType: 'road', elementType: 'geometry.stroke', stylers: [{ color: '#E6E6E6' }, { weight: 1 }] },
+            { featureType: 'road.highway', elementType: 'geometry', stylers: [{ color: '#FFFFFF' }] },
+            { featureType: 'road.highway', elementType: 'geometry.stroke', stylers: [{ color: '#E6E6E6' }, { weight: 1 }] },
+
+            // Land / water: soft, low contrast.
+            { featureType: 'water', elementType: 'geometry', stylers: [{ color: '#E9ECEF' }] },
+            { featureType: 'water', elementType: 'labels.text.fill', stylers: [{ color: '#8A8A8A' }] },
+
+            // POIs: hide most.
+            { featureType: 'poi', stylers: [{ visibility: 'off' }] },
+            { featureType: 'transit', stylers: [{ visibility: 'off' }] },
+
+            // Administrative labels: subtle.
+            { featureType: 'administrative', elementType: 'geometry', stylers: [{ color: '#EDEAE4' }] },
+            { featureType: 'administrative', elementType: 'labels.text.fill', stylers: [{ color: '#7A7A7A' }] },
+        ]
     });
     try { map.setTilt(45); } catch (_) {}
     return map;
@@ -614,8 +639,8 @@ function setGoogleRoutePolyline(path) {
         _gRouteShadow = new google.maps.Polyline({
             path: path,
             map: map,
-            strokeColor: '#000000',
-            strokeOpacity: 0.3,
+            strokeColor: '#C9A000',
+            strokeOpacity: 1,
             strokeWeight: 12,
             geodesic: true
         });
@@ -623,7 +648,7 @@ function setGoogleRoutePolyline(path) {
             path: path,
             map: map,
             geodesic: true,
-            strokeColor: '#FFD600',
+            strokeColor: '#FFD400',
             strokeWeight: 7,
             strokeOpacity: 1
         });
