@@ -540,17 +540,10 @@ function updateCamera(lat, lng, heading) {
     _camLat += (lat - _camLat) * 0.15;
     _camLng += (lng - _camLng) * 0.15;
 
-    // 🔥 forward offset (REAL 3D effect)
-    var offset = 0.0008;
-    var rad = heading * Math.PI / 180;
-
-    var camLat = _camLat + Math.cos(rad) * offset;
-    var camLng = _camLng + Math.sin(rad) * offset;
-
-    map.setCenter({ lat: camLat, lng: camLng });
+    map.setCenter({ lat: _camLat, lng: _camLng });
 
     try { map.setHeading(heading); } catch (_) {}
-    try { map.setTilt(60); } catch (_) {}
+    try { map.setTilt(0); } catch (_) {}
 }
 /** Backend / _driverRouteCoords: [[lng, lat], ...] -> path for google.maps.Polyline */
 function pathLatLngFromLngLatPairs(coordsLL) {
@@ -599,8 +592,8 @@ function setGoogleRoutePolyline(path) {
             path: path,
             map: map,
             strokeColor: '#000000',
-            strokeOpacity: 0.25,
-            strokeWeight: 10,
+            strokeOpacity: 0.3,
+            strokeWeight: 12,
             geodesic: true
         });
         _gRoutePolyline = new google.maps.Polyline({
@@ -608,8 +601,8 @@ function setGoogleRoutePolyline(path) {
             map: map,
             geodesic: true,
             strokeColor: '#FFD600',
-            strokeWeight: 6,
-            strokeOpacity: 0.9
+            strokeWeight: 7,
+            strokeOpacity: 1
         });
     } else {
         if (_gRouteShadow) {
