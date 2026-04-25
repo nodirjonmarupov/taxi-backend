@@ -20,7 +20,7 @@ let _gRouteShadow = null;
 let _gRouteAbPolyline = null;
 let routeRoadDistanceKm = null;
 let routeInstructions = [], routeCoordinates = [];
-// Turf route line feature (haydovchi uchun snapping va progressive trim)
+// Turf route line feature (haydovchi uchun snapping; polyline always full route)
 let _driverRouteLine = null;       // turf.lineString ??[lon,lat] koordinatlarda
 let _driverRouteCoords = [];       // [[lon,lat], ...] — route polyline (GeoJSON tartib)
 let _smoothedRouteCoords = null;
@@ -45,7 +45,6 @@ let _routeAnchorIdx = 0;
 let _currentInstructionIndex = 0; // next maneuver in routeInstructions; only advances forward
 let _stableZoom = null; // EMA-smoothed zoom; prevents per-frame flicker at speed boundaries
 let _lastNavUpdate = 0;      // throttle nav UI (~10 FPS adaptive)
-let _lastSnapUpdate = 0;     // throttle Turf nav snap (~10 FPS adaptive)
 let _lastPredSnapUpdate = 0; // throttle Turf prediction snap (~10 FPS)
 let _lastTurnI = null;       // DOM cache: suppress updateNavUI when nothing changed
 let _lastDist = null;
@@ -53,7 +52,7 @@ let _displayArrowBrg = null;
 let _lastStableLat = null;
 let _lastStableLng = null;
 let _pendingGps = null;    // queued GPS update received before _driverRouteLine was ready
-let _snapRouteLine = null;  // trimmed forward-only snap line; rebuilt after each snap
+let _snapRouteLine = null;  // mirror of full _driverRouteLine (no progressive trim)
 let _offRouteCount = 0;       // consecutive GPS samples past off-route threshold (noise filter)
 let _lastRerouteTime = 0;     // last reroute attempt timestamp (cooldown)
 let _rerouteInFlight = false; // single in-flight directions request for reroute
@@ -71,7 +70,6 @@ let _lastDbgLat = null;
 let _lastDbgLng = null;
 let _dispLat = null;
 let _dispLng = null;
-let _debugSnapCompareCounter = 0;
 let _dispArrowDeg = null;
 let _wakeLock = null;
 let northUpMode = false;
@@ -571,9 +569,9 @@ function updateCamera(lat, lng, heading) {
     var z = map.getZoom ? map.getZoom() : 17;
 
     var offset =
-        z >= 18 ? 0.0003 :
-        z >= 17 ? 0.0004 :
-                  0.0006;
+        z >= 18 ? 0.00045 :
+        z >= 17 ? 0.00070 :
+                  0.00100;
 
     if (typeof _lastCamBrg === 'number') {
         var d = heading - _lastCamBrg;
@@ -895,19 +893,36 @@ function renderLoop() {
             }
         }
 
+        if (_driverRouteLine && _driverRouteCoords && _driverRouteCoords.length > 1 && typeof turf !== 'undefined') {
+            try {
+                var snap = turf.nearestPointOnLine(_driverRouteLine, turf.point([dLng, dLat]));
+                if (snap && snap.geometry && snap.geometry.coordinates) {
+                    dLng = snap.geometry.coordinates[0];
+                    dLat = snap.geometry.coordinates[1];
+
+                    if (snap.properties && snap.properties.index != null) {
+                        var maxIdx = _driverRouteCoords.length > 1 ? _driverRouteCoords.length - 2 : 0;
+                        var newIdx = Math.min(snap.properties.index, maxIdx);
+
+                        if (typeof _routeAnchorIdx !== 'number' || isNaN(_routeAnchorIdx)) {
+                            _routeAnchorIdx = newIdx;
+                        } else {
+                            var diff = newIdx - _routeAnchorIdx;
+
+                            if (diff >= 0 && diff <= 3) {
+                                _routeAnchorIdx = newIdx;
+                            } else if (diff < 0 && Math.abs(diff) > 5) {
+                                _routeAnchorIdx = newIdx;
+                            }
+                        }
+                    }
+                }
+            } catch (_) {}
+        }
+
 
         // updateBearing ?????????????????????????????????????????????????????????
-        // ?_brg = 0.80 - 0.65 횞 min(spd/30, 1)
-        // ? at  0 km/h: 0.80s ??absorbs GPS bearing noise when nearly stopped.
-        // ? at 30 km/h: 0.15s ??tracks highway bends without lag.
-        // ? at 60 km/h: 0.15s ??capped; faster would overshoot sharp turns.
-        if (!useManualBearing) targetBearing = northUpMode ? 0 : brg;
-        var _tauBrg = 0.80 - 0.65 * Math.min(spd / 30, 1);
-        var _brgDecay = Math.exp(-dt / _tauBrg);
-        var _brgShortcut = ((targetBearing - displayBearing + 540) % 360) - 180;
-        displayBearing = (displayBearing + _brgShortcut * (1 - _brgDecay) + 360) % 360;
-
-        // SINGLE SOURCE BEARING (route-based)
+        // Route-based heading (segment bearing); GPS/lastHeading only as fallback.
         var _routeBearingApplied = false;
         if (typeof turf !== 'undefined' &&
             _driverRouteLine && _driverRouteLine.geometry &&
@@ -929,6 +944,16 @@ function renderLoop() {
         if (!_routeBearingApplied && lastHeading != null && !isNaN(lastHeading)) {
             brg = (Number(lastHeading) + 360) % 360;
         }
+
+        // ?_brg = 0.80 - 0.65 횞 min(spd/30, 1)
+        // ? at  0 km/h: 0.80s ??absorbs GPS bearing noise when nearly stopped.
+        // ? at 30 km/h: 0.15s ??tracks highway bends without lag.
+        // ? at 60 km/h: 0.15s ??capped; faster would overshoot sharp turns.
+        if (!useManualBearing) targetBearing = northUpMode ? 0 : brg;
+        var _tauBrg = 0.80 - 0.65 * Math.min(spd / 30, 1);
+        var _brgDecay = Math.exp(-dt / _tauBrg);
+        var _brgShortcut = ((targetBearing - displayBearing + 540) % 360) - 180;
+        displayBearing = (displayBearing + _brgShortcut * (1 - _brgDecay) + 360) % 360;
 
         // Arrow heading: adaptive tau to reduce low-speed jitter.
         var _tauHead = spd < 5 ? 0.25 : spd < 20 ? 0.15 : 0.10;
@@ -972,46 +997,7 @@ function renderLoop() {
                 arrowEl.style.transform = 'rotate(' + _dispArrowDeg + 'deg)';
             }
             // Adaptive intervals: slower when parked (stability), faster when moving (responsiveness).
-            var _snapInterval = spd < 5 ? 150 : 80;
             var _navInterval  = spd < 5 ? 150 : 80;
-            if (_nowMs - _lastSnapUpdate > _snapInterval) {
-                // Nav-progress Turf snap: throttled adaptively.
-                if (typeof turf !== 'undefined' && _driverRouteLine && _driverRouteLine.geometry) {
-                    try {
-                        var _navSnap = turf.nearestPointOnLine(_driverRouteLine, turf.point([dLng, dLat]));
-                        if (_navSnap && _navSnap.properties && _navSnap.properties.index != null) {
-                            var _maxIdx = _driverRouteCoords.length > 1 ? _driverRouteCoords.length - 2 : 0;
-                            var _newIdx = Math.min(_navSnap.properties.index, _maxIdx);
-                            if (typeof _routeAnchorIdx === 'number' && !isNaN(_routeAnchorIdx) && _newIdx < _routeAnchorIdx) {
-                                var diff = _routeAnchorIdx - _newIdx;
-
-                                // Allow real backward jump if it's large (actual turn)
-                                if (diff < 2) {
-                                    _newIdx = _routeAnchorIdx;
-                                }
-                            }
-
-                            if (_routeAnchorIdx == null) {
-                                _routeAnchorIdx = _newIdx;
-                            } else {
-                                var diff = Math.abs(_newIdx - _routeAnchorIdx);
-
-                                // only allow small forward movement
-                                if (_newIdx >= _routeAnchorIdx && diff <= 3) {
-                                    _routeAnchorIdx = _newIdx;
-                                }
-                                // ignore backward or big jumps (GPS noise)
-                            }
-                            if (_newIdx < _routeAnchorIdx) {
-                                // ignore backward movement
-                                _newIdx = _routeAnchorIdx;
-                            }
-                            console.log('[ANCHOR UPDATE]', _routeAnchorIdx);
-                        }
-                    } catch (_) {}
-                }
-                _lastSnapUpdate = _nowMs;
-            }
             if (_nowMs - _lastNavUpdate > _navInterval) {
                 setTurnAndDistFromDriver({ lat: dLat, lng: dLng });
                 // DOM guard: skip repaint when turn index and distance haven't meaningfully changed.
@@ -1036,7 +1022,7 @@ function renderLoop() {
             if (_stableZoom === null) { _stableZoom = _zoomTarget; }
             else { _stableZoom += (_zoomTarget - _stableZoom) * 0.02; }
             var _zoom = _stableZoom;
-            var _brgDelta = Math.abs(((displayBearing - _lastCamBrg + 540) % 360) - 180);
+            var _brgDelta = Math.abs(((displayHeading - _lastCamBrg + 540) % 360) - 180);
             var _moveDist = (_lastCamLat != null && _lastCamLng != null)
                 ? haversineM(dLat, dLng, _lastCamLat, _lastCamLng) : 999;
             var _moved = _moveDist > 1;
@@ -1044,7 +1030,7 @@ function renderLoop() {
             if ((_nowMs - _lastCamUpdate > 130) &&
                 (_moved || _brgDelta > 2 || _zoomDelta > 0.1)) {
                 if (Date.now() >= _camBlockUntil) {
-                    var currentHeading = displayBearing;
+                    var currentHeading = displayHeading;
                     if (!_moved) {
                         currentHeading = _lastCamBrg || currentHeading;
                     }
@@ -1684,69 +1670,10 @@ function updateDriverMarker(lat, lng, heading) {
             _pendingGps = { lat: lat, lng: lng, heading: heading };
             return;
         }
-        var _prevTrimLineForDbg = _snapRouteLine;
         var _prevSnappedLat = tLat, _prevSnappedLng = tLng;
-        var sl = lat, sa = lng;
-        if (typeof turf !== 'undefined' && _driverRouteLine && _driverRouteLine.geometry) {
-            try {
-                var _snapPt = turf.point([lng, lat]);
-                var _snapRes = turf.nearestPointOnLine(_driverRouteLine, _snapPt, { units: 'kilometers' });
-                if (_snapRes && _snapRes.geometry && _snapRes.geometry.coordinates) {
-                    sa = _snapRes.geometry.coordinates[0];
-                    sl = _snapRes.geometry.coordinates[1];
-                    // #region agent log
-                    try {
-                        _debugSnapCompareCounter++;
-                        if (_debugSnapCompareCounter % 25 === 0) {
-                            var _ptrim = _prevTrimLineForDbg;
-                            var _divergeM = null;
-                            if (_ptrim && _ptrim.geometry && _ptrim !== _driverRouteLine) {
-                                var _tn = turf.nearestPointOnLine(_ptrim, _snapPt, { units: 'kilometers' });
-                                if (_tn && _tn.geometry && _tn.geometry.coordinates) {
-                                    _divergeM = haversineM(sl, sa, _tn.geometry.coordinates[1], _tn.geometry.coordinates[0]);
-                                }
-                            }
-                            fetch('http://127.0.0.1:7602/ingest/b6487788-bee6-445f-81f9-95a1b43ce854',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'4d6510'},body:JSON.stringify({sessionId:'4d6510',location:'main.js:updateDriverMarker',message:'fullLineVsPrevTrimSnap',data:{divergeM:_divergeM,anchorBefore:_routeAnchorIdx,fullSnapIdx:_snapRes.properties&&_snapRes.properties.index!=null?_snapRes.properties.index:null,trimWasSameRef:_ptrim===_driverRouteLine},timestamp:Date.now(),hypothesisId:'H1'})}).catch(function(){});
-                        }
-                        if ((!_snapRes.properties || _snapRes.properties.index == null) && _debugSnapCompareCounter % 30 === 0) {
-                            fetch('http://127.0.0.1:7602/ingest/b6487788-bee6-445f-81f9-95a1b43ce854',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'4d6510'},body:JSON.stringify({sessionId:'4d6510',location:'main.js:updateDriverMarker',message:'snapMissingRouteIndex',data:{},timestamp:Date.now(),hypothesisId:'H3'})}).catch(function(){});
-                        }
-                    } catch (_lg) {}
-                    // #endregion
-                    if (_snapRes.properties && _snapRes.properties.index != null) {
-                        var _maxIdx = _driverRouteCoords.length > 1 ? _driverRouteCoords.length - 2 : 0;
-                        var _newIdx = Math.min(_snapRes.properties.index, _maxIdx);
-                        if (typeof _routeAnchorIdx === 'number' && !isNaN(_routeAnchorIdx) && _newIdx < _routeAnchorIdx) {
-                            var diff = _routeAnchorIdx - _newIdx;
-                            if (diff < 2) {
-                                _newIdx = _routeAnchorIdx;
-                            }
-                        }
-                        _routeAnchorIdx = _newIdx;
-                        console.log('[ANCHOR UPDATE]', _routeAnchorIdx);
-                        var _trimCoords = [[sa, sl]].concat(_driverRouteCoords.slice(_routeAnchorIdx + 1));
-                        if (_trimCoords.length >= 2) {
-                            try { _snapRouteLine = turf.lineString(_trimCoords); } catch (_) {}
-                            // #region agent log
-                            if (_debugSnapCompareCounter % 27 === 0) {
-                                fetch('http://127.0.0.1:7602/ingest/b6487788-bee6-445f-81f9-95a1b43ce854',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'4d6510'},body:JSON.stringify({sessionId:'4d6510',location:'main.js:updateDriverMarker',message:'trimLineShape',data:{trimVertexCount:_trimCoords.length,driverVertexCount:_driverRouteCoords.length,anchor:_routeAnchorIdx},timestamp:Date.now(),hypothesisId:'H2'})}).catch(function(){});
-                            }
-                            // #endregion
-                        }
-                    }
-                }
-            } catch (_e) {
-                if (routeCoordinates && routeCoordinates.length >= 2) {
-                    var _fb = snapToRoute(lat, lng);
-                    sl = _fb[0]; sa = _fb[1]; _routeAnchorIdx = _fb[2];
-                    console.log('[ANCHOR UPDATE]', _routeAnchorIdx);
-                }
-            }
-        } else if (routeCoordinates && routeCoordinates.length >= 2) {
-            var _fb2 = snapToRoute(lat, lng);
-            sl = _fb2[0]; sa = _fb2[1]; _routeAnchorIdx = _fb2[2];
-            console.log('[ANCHOR UPDATE]', _routeAnchorIdx);
-        }
+        // Raw GPS only here — route snap lives in renderLoop (dLat/dLng / marker display).
+        var sl = lat;
+        var sa = lng;
         var driverPos = { lat: sl, lng: sa };
         var now = Date.now();
         var speedKmh = 0;
@@ -1782,8 +1709,7 @@ function updateDriverMarker(lat, lng, heading) {
             _smoothVelLat = 0; _smoothVelLng = 0;
             _velLat = 0; _velLng = 0;
         }
-        // _routeAnchorIdx is now set at snap time (from Turf's properties.index or
-        // snapToRoute's return value). No secondary vertex search needed here.
+        // _routeAnchorIdx is advanced in renderLoop (post-smooth Turf snap).
         _gpsAnchorLat = sl;
         _gpsAnchorLng = sa;
         _gpsAnchorMs = now;
@@ -1974,12 +1900,6 @@ function _applyRouteGeometryToMap(fromLat, fromLng, toLat, toLng) {
                 _lastProgressLat = newLat;
                 _lastProgressLng = newLng;
 
-                if (snap.properties && snap.properties.index != null) {
-                    var _maxIdxRa = _driverRouteCoords.length > 1 ? _driverRouteCoords.length - 2 : 0;
-                    _routeAnchorIdx = Math.min(snap.properties.index, _maxIdxRa);
-                    console.log('[ANCHOR UPDATE]', _routeAnchorIdx);
-                }
-
             }
         } catch (_) {}
     }
@@ -2115,24 +2035,9 @@ function drawRoute(from, to, opts) {
     });
 }
 
-/**
- * Progressive trim: haydovchi o'tib ketgan yo'l qismini o'chirib,
- * faqat haydovchidan pickup gacha sariq chiziqni xaritada ko'rsatadi.
- * driverLon, driverLat ??snapped yoki GPS koordinatalar [lon, lat].
- */
+/** Progressive polyline trim removed; route polyline stays full. No-op for existing call sites. */
 function updateProgressiveRoute(driverLon, driverLat) {
-    if (!_driverRouteCoords || _driverRouteCoords.length < 2) return;
-    if (typeof _routeAnchorIdx !== 'number' || isNaN(_routeAnchorIdx)) return;
-
-    var idx = Math.max(0, Math.min(_routeAnchorIdx, _driverRouteCoords.length - 2));
-    if (_lastProgressAnchorIdx !== null && idx <= _lastProgressAnchorIdx) return;
-
-    // TEMP DISABLED: progressive route drawing
     return;
-
-    _lastProgressAnchorIdx = idx;
-    _lastProgressLat = driverLat;
-    _lastProgressLng = driverLon;
 }
 
 function fallbackStraightLine(fromLat, fromLng, toLat, toLng) {
@@ -2186,9 +2091,7 @@ async function tryReroute(lat, lng) {
     _rerouteInFlight = true;
 
     try {
-        _routeAnchorIdx = 0;
         resetRouteProgress();
-        console.log('[ANCHOR UPDATE]', _routeAnchorIdx);
         _snapRouteLine = null;
         var routed = await drawRoute(
             { lat: lat, lng: lng },
