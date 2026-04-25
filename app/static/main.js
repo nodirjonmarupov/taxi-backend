@@ -499,33 +499,15 @@ function initGoogleMap(initialLat, initialLng) {
         gestureHandling: 'greedy',
         clickableIcons: false,
         mapTypeId: 'roadmap',
-        styles: [
-            // Base: light beige background, minimal clutter.
-            { elementType: 'geometry', stylers: [{ color: '#F5F3EF' }] },
-            { elementType: 'labels.icon', stylers: [{ visibility: 'off' }] },
-            { elementType: 'labels.text.fill', stylers: [{ color: '#6B6B6B' }] },
-            { elementType: 'labels.text.stroke', stylers: [{ color: '#F5F3EF' }] },
-
-            // Roads: white with subtle gray borders.
-            { featureType: 'road', elementType: 'geometry', stylers: [{ color: '#FFFFFF' }] },
-            { featureType: 'road', elementType: 'geometry.stroke', stylers: [{ color: '#E6E6E6' }, { weight: 1 }] },
-            { featureType: 'road.highway', elementType: 'geometry', stylers: [{ color: '#FFFFFF' }] },
-            { featureType: 'road.highway', elementType: 'geometry.stroke', stylers: [{ color: '#E6E6E6' }, { weight: 1 }] },
-
-            // Land / water: soft, low contrast.
-            { featureType: 'water', elementType: 'geometry', stylers: [{ color: '#E9ECEF' }] },
-            { featureType: 'water', elementType: 'labels.text.fill', stylers: [{ color: '#8A8A8A' }] },
-
-            // POIs: hide most.
-            { featureType: 'poi', stylers: [{ visibility: 'off' }] },
-            { featureType: 'transit', stylers: [{ visibility: 'off' }] },
-
-            // Administrative labels: subtle.
-            { featureType: 'administrative', elementType: 'geometry', stylers: [{ color: '#EDEAE4' }] },
-            { featureType: 'administrative', elementType: 'labels.text.fill', stylers: [{ color: '#7A7A7A' }] },
-        ]
+        renderingType: google.maps.RenderingType.VECTOR,
+        tilt: 45,
+        heading: 0,
+        isFractionalZoomEnabled: true
     });
-    try { map.setTilt(45); } catch (_) {}
+    google.maps.event.addListenerOnce(map, 'tilesloaded', function() {
+        try { map.setTilt(45); } catch (e) { console.warn('map.setTilt failed (tilesloaded)', e); }
+    });
+    try { map.setTilt(45); } catch (e) { console.warn('map.setTilt failed (init)', e); }
     return map;
 }
 function mapResize() {
@@ -588,8 +570,8 @@ function updateCamera(lat, lng, heading) {
 
     map.setCenter({ lat: camLat, lng: camLng });
 
-    try { map.setHeading(heading); } catch (_) {}
-    try { map.setTilt(45); } catch (_) {}
+    try { map.setHeading(heading); } catch (e) { console.warn('map.setHeading failed', e); }
+    try { map.setTilt(45); } catch (e) { console.warn('map.setTilt failed', e); }
 }
 /** Backend / _driverRouteCoords: [[lng, lat], ...] -> path for google.maps.Polyline */
 function pathLatLngFromLngLatPairs(coordsLL) {
