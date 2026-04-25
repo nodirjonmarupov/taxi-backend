@@ -283,10 +283,12 @@ async def driving_directions(
         logger.error("driving_directions httpx: %s", e)
         return {"ok": False, "error": "upstream_failed", "coordinates": [], "distance_km": 0.0, "instructions": []}
 
-    st = (g.get("status") or "").upper()
-    if st != "OK" or not g.get("routes"):
-        logger.info("driving_directions Google status=%s", st)
-        return {"ok": False, "error": st.lower(), "coordinates": [], "distance_km": 0.0, "instructions": []}
+    status = (g.get("status") or "").upper()
+    if status != "OK" or not g.get("routes"):
+        logger.info(f"driving_directions Google status={status}")
+        if status != "OK":
+            logger.error(f"Google Directions error: {g}")
+        return {"ok": False, "error": status.lower(), "coordinates": [], "distance_km": 0.0, "instructions": []}
 
     route0 = g["routes"][0]
     overview = (route0.get("overview_polyline") or {}).get("points")
