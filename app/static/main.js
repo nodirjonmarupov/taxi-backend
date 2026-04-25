@@ -59,15 +59,6 @@ let _rerouteInFlight = false; // single in-flight directions request for reroute
 let _routeInFlight = false;   // global mutex: any drawRoute directions fetch
 /** Last successful road route (avoid duplicate Directions calls for tiny GPS jitter). */
 let _routeFetchCache = null;
-
-function dbgLog(msg) {
-  var el = document.getElementById('dbg-overlay');
-  if (!el) return;
-  var lines = el.innerText ? el.innerText.split('\n') : [];
-  lines.unshift(msg);
-  if (lines.length > 6) lines = lines.slice(0, 6);
-  el.innerText = lines.join('\n');
-}
 var ROUTE_MIN_API_SEGMENT_M = 50;
 var ROUTE_SAME_ENDPOINT_M = 10;
 var ROUTE_CACHE_NEAR_M = 50;
@@ -555,10 +546,6 @@ function mapEaseToCamera(opts) {
 }
 function updateCamera(lat, lng, heading) {
     if (!map || !_mapsJsReady()) return;
-    dbgLog('[CAM] hdg:' + Math.round(heading) +
-           ' disp:' + Math.round(displayHeading) +
-           ' brg:' + Math.round(brg));
-    console.log('[CAM]', lat, lng, heading, '_followMode:', _followMode);
 
     if (_camLat === null) {
         _camLat = lat;
@@ -1039,9 +1026,6 @@ function renderLoop() {
                 (_moved || _brgDelta > 2 || _zoomDelta > 0.1 || _timeForced)) {
                 if (Date.now() >= _camBlockUntil) {
                     var currentHeading = displayHeading;
-                    if (!_moved) {
-                        currentHeading = _lastCamBrg || currentHeading;
-                    }
                     if (map.getZoom && map.getZoom() < 17) {
                         map.setZoom(17);
                     }
@@ -1052,8 +1036,7 @@ function renderLoop() {
                     _lastCamLng = dLng;
                     _lastCamUpdate = _nowMs;
                 } else {
-                    console.log('[CAM_BLOCK]', _camBlockUntil - Date.now());
-                    dbgLog('[BLK] ' + Math.round(_camBlockUntil - Date.now()) + 'ms');
+                    // Camera blocked by recent user interaction (recenter/zoom).
                 }
             }
         }
@@ -1667,7 +1650,6 @@ function updateDriverMarker(lat, lng, heading) {
     try {
         if (!map || !ORDER_DATA) return;
         if (!isValidCoord(lat, lng)) return;
-        dbgLog('[GPS] spd:' + Math.round(spd) + ' brg:' + Math.round(heading != null ? heading : brg));
         // Cache GPS heading for rotation fallback when route bearing isn't available.
         if (heading != null && !isNaN(Number(heading))) {
             lastHeading = (Number(heading) + 360) % 360;
