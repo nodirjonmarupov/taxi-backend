@@ -1998,14 +1998,8 @@ function updateProgressiveRoute(driverLon, driverLat) {
     var idx = Math.max(0, Math.min(_routeAnchorIdx, _driverRouteCoords.length - 2));
     if (_lastProgressAnchorIdx !== null && idx <= _lastProgressAnchorIdx) return;
 
-    // Start polyline at exact snapped position (same as marker), not at route vertex idx.
-    var remainingCoords = [[driverLon, driverLat]].concat(_driverRouteCoords.slice(idx + 1));
-    if (!remainingCoords || remainingCoords.length < 2) return;
-
-    var path = remainingCoords.map(function(c) {
-        return { lat: Number(c[1]), lng: Number(c[0]) };
-    });
-    if (path.length >= 2) setGoogleRoutePolyline(path);
+    // TEMP DISABLED: progressive route drawing
+    return;
 
     _lastProgressAnchorIdx = idx;
     _lastProgressLat = driverLat;
