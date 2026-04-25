@@ -2,7 +2,6 @@
 WebApp API routes
 """
 import json
-import re
 import time
 import httpx
 from pathlib import Path
@@ -32,7 +31,6 @@ from app.services.taximeter_service import (
 from app.services.trip_billing import compute_server_final_price_for_completion
 from app.models.order import Order, OrderStatus, order_skip_customer_notifications
 from app.core.logger import get_logger
-from app.utils.google_polyline import decode_google_polyline
 
 logger = get_logger(__name__)
 
@@ -75,12 +73,6 @@ def _parse_coords(lat, lon):
 def _sanitize_distance(km) -> float:
     """1000 km dan oshsa 0 (ngrok/IP xato koordinata)"""
     return sanitize_distance_km(km)
-
-
-def _strip_html_instructions(s: str) -> str:
-    t = re.sub(r"<[^>]+>", " ", s or "")
-    t = re.sub(r"\s+", " ", t).strip()
-    return t
 
 
 def _tariff_snapshot_from_settings(s, at: Optional[datetime] = None) -> dict:
@@ -247,7 +239,7 @@ async def driving_directions(
     db: AsyncSession = Depends(get_db),
 ):
     """
-    Google Directions JSON (server proxy — mijoz brauzeridan to'g'ridan-to'g'ri chaqirolmaydi CORS sababli).
+    OSRM route (server proxy — mijoz brauzeridan to'g'ridan-to'g'ri chaqirolmaydi CORS sababli).
     Redis / compute_fare / trip_state ga tegmaydi.
     """
     t = token or qtoken
@@ -268,78 +260,46 @@ async def driving_directions(
         if not _valid_coord(float(la), float(lo)):
             return {"ok": False, "error": "invalid_coordinates", "coordinates": [], "distance_km": 0.0, "instructions": []}
 
-    api_key = (getattr(settings, "GOOGLE_DIRECTIONS_API_KEY", None) or "").strip()
-    if not api_key:
-        logger.warning("driving_directions: GOOGLE_DIRECTIONS_API_KEY bo'sh")
-        return {"ok": False, "error": "directions_not_configured", "coordinates": [], "distance_km": 0.0, "instructions": []}
-
-    params = {
-        "origin": f"{float(origin_lat)},{float(origin_lng)}",
-        "destination": f"{float(dest_lat)},{float(dest_lng)}",
-        "key": api_key,
-    }
+    # OSRM: lon,lat order in path (GeoJSON coordinates are [lng, lat])
+    osrm_url = (
+        "https://router.project-osrm.org/route/v1/driving/"
+        f"{float(origin_lng)},{float(origin_lat)};{float(dest_lng)},{float(dest_lat)}"
+        "?overview=full&geometries=geojson"
+    )
     try:
         async with httpx.AsyncClient(timeout=12.0) as client:
-            resp = await client.get(
-                "https://maps.googleapis.com/maps/api/directions/json",
-                params=params,
-            )
-            g = resp.json()
+            resp = await client.get(osrm_url)
+            data = resp.json()
     except Exception as e:
         logger.error("driving_directions httpx: %s", e)
-        return {"ok": False, "error": "upstream_failed", "coordinates": [], "distance_km": 0.0, "instructions": []}
+        return {"ok": False, "error": "no_route"}
 
     if resp.status_code != 200:
-        logger.error("Directions API HTTP %s: %s", resp.status_code, g)
-        return {"ok": False, "error": "no_route", "coordinates": [], "distance_km": 0.0, "instructions": []}
+        logger.error("OSRM error: %s", data)
+        return {"ok": False, "error": "no_route"}
 
-    status = (g.get("status") or "").strip()
-    logger.info(f"Directions API status={status}")
-    if status != "OK":
-        logger.error("Directions API full response: %s", json.dumps(g, default=str))
-        return {"ok": False, "error": "no_route", "coordinates": [], "distance_km": 0.0, "instructions": []}
+    if data.get("code") != "Ok":
+        logger.error("OSRM error: %s", data)
+        return {"ok": False, "error": "no_route"}
 
-    routes = g.get("routes")
+    routes = data.get("routes")
     if not routes:
-        logger.error("Directions API status=OK but no routes: %s", json.dumps(g, default=str))
-        return {"ok": False, "error": "no_route", "coordinates": [], "distance_km": 0.0, "instructions": []}
+        logger.error("OSRM error: %s", data)
+        return {"ok": False, "error": "no_route"}
 
-    route0 = routes[0]
-    enc = (route0.get("overview_polyline") or {}).get("points")
-    if not enc:
-        logger.error("Directions API missing overview polyline: %s", json.dumps(g, default=str))
-        return {"ok": False, "error": "no_route", "coordinates": [], "distance_km": 0.0, "instructions": []}
+    route = routes[0]
+    geometry = (route.get("geometry") or {}).get("coordinates")
+    if not geometry or not isinstance(geometry, list):
+        logger.error("OSRM error: %s", data)
+        return {"ok": False, "error": "no_route"}
 
-    latlng_pairs = decode_google_polyline(enc)
-    # JS / Turf: [[lng, lat], ...] (unchanged)
-    coordinates = [[float(lng), float(lat)] for lat, lng in latlng_pairs]
+    distance_km = float(route.get("distance") or 0) / 1000.0
 
-    distance_m = 0
-    for leg in route0.get("legs") or []:
-        dist = (leg or {}).get("distance") or {}
-        try:
-            if dist.get("value") is not None:
-                distance_m += int(dist.get("value") or 0)
-        except (TypeError, ValueError):
-            pass
-    distance_km = float(distance_m) / 1000.0 if distance_m else 0.0
-
-    instructions: list[dict[str, Any]] = []
-    step_idx = 0
-    for leg in route0.get("legs") or []:
-        for step in (leg or {}).get("steps") or []:
-            if not isinstance(step, dict):
-                continue
-            raw = step.get("html_instructions")
-            txt = _strip_html_instructions(str(raw) if raw is not None else "")
-            instructions.append({"text": str(txt)[:500], "type": -1, "index": step_idx})
-            step_idx += 1
-
+    logger.info("OSRM route OK")
     return {
         "ok": True,
-        "coordinates": coordinates,
+        "coordinates": geometry,
         "distance_km": distance_km,
-        "instructions": instructions,
     }
 
 
