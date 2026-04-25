@@ -523,16 +523,23 @@ function mapEaseToCamera(opts) {
     try { if (opts.bearing != null) map.setHeading(opts.bearing); } catch (_) {}
     try { if (opts.pitch != null) map.setTilt(opts.pitch); } catch (_) {}
 }
-function _coordsFromRouteGeoJSON(routeGeoJSON) {
+/** Backend / _driverRouteCoords: [[lng, lat], ...] -> path for google.maps.Polyline */
+function pathLatLngFromLngLatPairs(coordsLL) {
     var path = [];
-    if (!routeGeoJSON || !routeGeoJSON.features || !routeGeoJSON.features.length) return path;
-    var geom = routeGeoJSON.features[0].geometry;
-    if (!geom || !geom.coordinates || !geom.coordinates.length) return path;
-    for (var i = 0; i < geom.coordinates.length; i++) {
-        var c = geom.coordinates[i];
-        if (c && c.length >= 2 && !isNaN(c[0]) && !isNaN(c[1])) path.push({ lat: Number(c[1]), lng: Number(c[0]) });
+    for (var i = 0; i < (coordsLL || []).length; i++) {
+        var p = coordsLL[i];
+        if (!p || p.length < 2) continue;
+        var lng = Number(p[0]);
+        var lat = Number(p[1]);
+        if (isNaN(lat) || isNaN(lng) || !isValidCoord(lat, lng)) continue;
+        path.push({ lat: lat, lng: lng });
     }
     return path;
+}
+function setMainRoutePolylineFromDriverCoords() {
+    if (!_driverRouteCoords || _driverRouteCoords.length < 2) return;
+    var path = pathLatLngFromLngLatPairs(_driverRouteCoords);
+    if (path.length) setGoogleRoutePolyline(path);
 }
 function setGoogleRoutePolyline(path) {
     if (!map || !_mapsJsReady() || !path || !path.length) return;
@@ -540,11 +547,8 @@ function setGoogleRoutePolyline(path) {
         _gRoutePolyline = new google.maps.Polyline({
             path: path,
             map: map,
-            geodesic: true,
             strokeColor: '#FFD600',
-            strokeWeight: 5,
-            strokeOpacity: 1,
-            zIndex: 50
+            strokeWeight: 5
         });
     } else {
         _gRoutePolyline.setPath(path);
@@ -1767,39 +1771,6 @@ function tick() {
     // Nav UI driven by renderLoop; no duplicate call here.
 }
 
-function buildRouteGeoJSON(coords) {
-    return {
-        type: 'FeatureCollection',
-        features: [{
-            type: 'Feature',
-            geometry: {
-                type: 'LineString',
-                coordinates: coords.map(function(c) {
-                    var la = c.lat != null ? c.lat : c[0];
-                    var ln = c.lng != null ? c.lng : c[1];
-                    return [ln, la];
-                })
-            },
-            properties: {}
-        }]
-    };
-}
-
-function safeAddRouteLayer(routeGeoJSON) {
-    if (!map || !_mapsJsReady()) return;
-    var path = _coordsFromRouteGeoJSON(routeGeoJSON);
-    if (!path.length) return;
-    console.log('[ROUTE SETDATA]');
-    setGoogleRoutePolyline(path);
-}
-
-function safeAddRouteABLayer(routeGeoJSON) {
-    if (!map || !_mapsJsReady()) return;
-    var path = _coordsFromRouteGeoJSON(routeGeoJSON);
-    if (!path.length) return;
-    setGoogleRouteABPolyline(path);
-}
-
 function resetRouteProgress() {
     _lastProgressAnchorIdx = null;
 }
@@ -1894,8 +1865,7 @@ function _applyRouteGeometryToMap(fromLat, fromLng, toLat, toLng) {
         var _pg = _pendingGps; _pendingGps = null;
         updateDriverMarker(_pg.lat, _pg.lng, _pg.heading);
     }
-    var routeGeoJSON = buildRouteGeoJSON(routeCoordinates);
-    safeAddRouteLayer(routeGeoJSON);
+    setMainRoutePolylineFromDriverCoords();
     setTurnAndDistFromDriver({ lat: fromLat, lng: fromLng });
     updateNavUI();
 }
@@ -2032,10 +2002,10 @@ function updateProgressiveRoute(driverLon, driverLat) {
     var remainingCoords = [[driverLon, driverLat]].concat(_driverRouteCoords.slice(idx + 1));
     if (!remainingCoords || remainingCoords.length < 2) return;
 
-    // [lon,lat] -> [lat,lng] for buildRouteGeoJSON
-    var trimCoords = remainingCoords.map(function(c) { return [c[1], c[0]]; });
-    var geo = buildRouteGeoJSON(trimCoords);
-    safeAddRouteLayer(geo);
+    var path = remainingCoords.map(function(c) {
+        return { lat: Number(c[1]), lng: Number(c[0]) };
+    });
+    if (path.length >= 2) setGoogleRoutePolyline(path);
 
     _lastProgressAnchorIdx = idx;
     _lastProgressLat = driverLat;
@@ -2056,9 +2026,12 @@ function fallbackStraightLine(fromLat, fromLng, toLat, toLng) {
     routeRoadDistanceKm = haversineM(fromLat, fromLng, toLat, toLng) / 1000;
     routeInstructions = [{ text: "To'g'ri yo'l", type: -1, index: 0 }];
     _currentInstructionIndex = 0;
-    var routeGeoJSON = buildRouteGeoJSON(routeCoordinates);
-    safeAddRouteLayer(routeGeoJSON);
-    safeAddRouteABLayer(routeGeoJSON);
+    var fbPath = [
+        { lat: fromLat, lng: fromLng },
+        { lat: toLat, lng: toLng }
+    ];
+    setGoogleRoutePolyline(fbPath);
+    setGoogleRouteABPolyline(fbPath);
     setTurnAndDistFromDriver({ lat: fromLat, lng: fromLng });
     updateNavUI();
     if (_pendingGps !== null) {
@@ -2149,12 +2122,10 @@ function drawRouteAB(fromA, toB) {
     var fromLng = fromA.lng != null ? fromA.lng : fromA[1];
     var toLat = toB.lat != null ? toB.lat : toB[0];
     var toLng = toB.lng != null ? toB.lng : toB[1];
-    var coords = [
-        [fromLat, fromLng],
-        [toLat, toLng]
-    ];
-    var routeGeoJSON = buildRouteGeoJSON(coords);
-    safeAddRouteABLayer(routeGeoJSON);
+    setGoogleRouteABPolyline([
+        { lat: fromLat, lng: fromLng },
+        { lat: toLat, lng: toLng }
+    ]);
 }
 
 async function handleArrived() {
