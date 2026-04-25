@@ -721,6 +721,7 @@ async def get_taximeter_v2(order_id: str = "0"):
     html = (
         _TAXIMETER_TEMPLATE.read_text(encoding="utf-8")
         .replace("__WEBAPP_BASE_URL__", base_url)
+        .replace("{{GOOGLE_MAPS_JS_KEY}}", gm_key)
         .replace("__GOOGLE_MAPS_JS_KEY__", gm_key)
     )
     return HTMLResponse(html)
