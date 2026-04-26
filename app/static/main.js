@@ -44,6 +44,8 @@ let _camLat = null;
 let _camLng = null;
 let _lastCamUpdate = 0;
 let _userZooming = false;
+let _userInteracting = false;
+let _lastUserInteraction = 0;
 let _velLat = 0, _velLng = 0;
 let _smoothVelLat = 0, _smoothVelLng = 0;
 let _gpsAnchorLat = null, _gpsAnchorLng = null, _gpsAnchorMs = 0;
@@ -52,6 +54,7 @@ let _followMode = true;
 let _routeAnchorIdx = 0;
 let _currentInstructionIndex = 0; // next maneuver in routeInstructions; only advances forward
 let _stableZoom = null; // EMA-smoothed zoom; prevents per-frame flicker at speed boundaries
+let _zoomInitialized = false;
 let _lastNavUpdate = 0;      // throttle nav UI (~10 FPS adaptive)
 let _lastPredSnapUpdate = 0; // throttle Turf prediction snap (~10 FPS)
 let _lastTurnI = null;       // DOM cache: suppress updateNavUI when nothing changed
@@ -63,6 +66,16 @@ let _pendingGps = null;    // queued GPS update received before _driverRouteLine
 let _snapRouteLine = null;  // mirror of full _driverRouteLine (no progressive trim)
 let _offRouteCount = 0;       // consecutive GPS samples past off-route threshold (noise filter)
 let _lastRerouteTime = 0;     // last reroute attempt timestamp (cooldown)
+let _lastForceRerouteAt = 0;
+const FORCE_REROUTE_MIN_INTERVAL_MS = 1500;
+
+function canForceRerouteNow() {
+    const now = Date.now();
+    if (now - _lastForceRerouteAt < FORCE_REROUTE_MIN_INTERVAL_MS) return false;
+    _lastForceRerouteAt = now;
+    return true;
+}
+
 let _rerouteInFlight = false; // single in-flight directions request for reroute
 let _routeInFlight = false;   // global mutex: any drawRoute directions fetch
 /** Last successful road route (avoid duplicate Directions calls for tiny GPS jitter). */
@@ -530,12 +543,24 @@ function initGoogleMap(initialLat, initialLng) {
         heading: 0,
         isFractionalZoomEnabled: true
     });
+    if (!_zoomInitialized) {
+        try { map.setZoom(17); } catch (_) {}
+        _zoomInitialized = true;
+    }
     map.addListener('zoom_changed', function () {
         _userZooming = true;
 
         setTimeout(function () {
             _userZooming = false;
         }, 2000);
+    });
+    map.addListener('zoom_changed', function () {
+        _userInteracting = true;
+        _lastUserInteraction = Date.now();
+    });
+    map.addListener('dragstart', function () {
+        _userInteracting = true;
+        _lastUserInteraction = Date.now();
     });
     // Attempt to hide POIs/transit. In VECTOR mode this may be ignored (acceptable).
     try {
@@ -567,13 +592,11 @@ function mapEaseToCamera(opts) {
     var dur = opts.duration != null ? opts.duration : 350;
     if (dur === 0) {
         map.setCenter(ll);
-        if (opts.zoom != null) map.setZoom(opts.zoom);
         try { if (opts.bearing != null) map.setHeading(opts.bearing); } catch (_) {}
         try { if (opts.pitch != null) map.setTilt(opts.pitch); } catch (_) {}
         return;
     }
     map.setCenter(ll);
-    if (opts.zoom != null) map.setZoom(opts.zoom);
     try { if (opts.bearing != null) map.setHeading(opts.bearing); } catch (_) {}
     try { if (opts.pitch != null) map.setTilt(opts.pitch); } catch (_) {}
 }
@@ -663,9 +686,12 @@ function setGoogleRoutePolyline(path) {
             path: path,
             map: map,
             strokeColor: '#C9A000',
-            strokeOpacity: 1,
+            strokeOpacity: 0.85,
             strokeWeight: 12,
-            geodesic: true
+            geodesic: true,
+            zIndex: 1,
+            lineJoin: 'round',
+            lineCap: 'round'
         });
         _gRoutePolyline = new google.maps.Polyline({
             path: path,
@@ -673,7 +699,10 @@ function setGoogleRoutePolyline(path) {
             geodesic: true,
             strokeColor: '#FFD400',
             strokeWeight: 7,
-            strokeOpacity: 1
+            strokeOpacity: 1,
+            zIndex: 2,
+            lineJoin: 'round',
+            lineCap: 'round'
         });
     } else {
         if (_gRouteShadow) {
@@ -805,13 +834,11 @@ function recenter() {
             center: [cc[1], cc[0]],
             bearing: displayBearing,
             pitch: pitch,
-            zoom: zoom,
             duration: 350
         });
     } else if (lastDriverLocation && map) {
         mapEaseToCamera({
             center: [lastDriverLocation.lon, lastDriverLocation.lat],
-            zoom: map.getZoom() || 17,
             bearing: displayBearing,
             pitch: 60,
             duration: 350
@@ -1058,6 +1085,12 @@ function renderLoop() {
             }
         }
 
+        if (_userInteracting) {
+            if (Date.now() - _lastUserInteraction > 3000) {
+                _userInteracting = false;
+            }
+        }
+
         // updateCamera ??????????????????????????????????????????????????????????
         // Uses _camLat/Lng (camera-smoothed position) ??not raw dLat/dLng ??
         // to avoid float jitter reaching the GPU.
@@ -1080,10 +1113,9 @@ function renderLoop() {
                 (_moved || _brgDelta > 2 || _zoomDelta > 0.1 || _timeForced)) {
                 if (Date.now() >= _camBlockUntil) {
                     var currentHeading = displayHeading;
-                    if (!_userZooming && map.getZoom && map.getZoom() < 17) {
-                        map.setZoom(17);
+                    if (!_userInteracting) {
+                        updateCamera(dLat, dLng, currentHeading);
                     }
-                    updateCamera(dLat, dLng, currentHeading);
                     _lastCamBrg = currentHeading;
 
                     _lastCamLat = dLat;
@@ -1502,10 +1534,6 @@ function fitBoundsToMarkers() {
     bounds.extend(new google.maps.LatLng(minLat, minLng));
     bounds.extend(new google.maps.LatLng(maxLat, maxLng));
     map.fitBounds(bounds, 100);
-    try {
-        var z = map.getZoom();
-        if (z != null && z > 16) map.setZoom(16);
-    } catch (_) {}
 }
 
 function sendDriverLocationToBackend(lat, lng, heading) {
@@ -1965,7 +1993,7 @@ function _applyRouteGeometryToMap(fromLat, fromLng, toLat, toLng) {
 function drawRoute(from, to, opts) {
     opts = opts || {};
     if (!map || !from || !to) return Promise.resolve(false);
-    if (_routeInFlight) return Promise.resolve(false);
+    if (_routeInFlight && !opts?.fromReroute) return Promise.resolve(false);
     if (_rerouteInFlight && !opts.fromReroute) return Promise.resolve(false);
 
     // from: L.LatLng yoki {lat, lng} bo?쁫ishi mumkin
@@ -2108,6 +2136,8 @@ function fallbackStraightLine(fromLat, fromLng, toLat, toLng) {
         { lat: fromLat, lng: fromLng },
         { lat: toLat, lng: toLng }
     ];
+    _routeHash = null;
+    _smoothedCoordsHash = null;
     setGoogleRoutePolyline(fbPath);
     setGoogleRouteABPolyline(fbPath);
     setTurnAndDistFromDriver({ lat: fromLat, lng: fromLng });
@@ -2133,17 +2163,15 @@ function shouldReroute() {
  * Requires consecutive samples >= OFF_ROUTE_THRESHOLD_M before tryReroute (reduces GPS spike false positives).
  * tryReroute applies cooldown, in-flight guard, then drawRoute.
  */
-async function tryReroute(lat, lng) {
-    if (_rerouteInFlight) return false;
-    if (_routeInFlight) return false;
-    if (!shouldReroute()) return false;
+async function tryReroute(lat, lng, opts = {}) {
+    if (_rerouteInFlight && !opts?.force) return false;
+    if (!opts.force && !shouldReroute()) return false;
 
     _rerouteInFlight = true;
-
     try {
         resetRouteProgress();
         _snapRouteLine = null;
-        var routed = await drawRoute(
+        const ok = await drawRoute(
             { lat: lat, lng: lng },
             {
                 lat: ORDER_DATA.destination_latitude,
@@ -2151,21 +2179,53 @@ async function tryReroute(lat, lng) {
             },
             { fromReroute: true }
         );
-        if (!routed) return false;
+        if (!ok) {
+            fallbackStraightLine(
+                lat, lng,
+                ORDER_DATA.destination_latitude,
+                ORDER_DATA.destination_longitude
+            );
+        }
         return true;
     } catch (e) {
-        console.warn('Reroute failed', e);
-        _lastRerouteTime = Date.now() - 3000;
-        return false;
+        try {
+            fallbackStraightLine(
+                lat, lng,
+                ORDER_DATA.destination_latitude,
+                ORDER_DATA.destination_longitude
+            );
+        } catch (_) {}
+        return true;
     } finally {
         _rerouteInFlight = false;
     }
 }
 
 function checkOffRoute(lat, lng, speed) {
-    if (appState !== 'trip') return;
+    if (appState === 'trip') {
+        try {
+            var pt = (typeof turf !== 'undefined')
+                ? turf.point([lng, lat])
+                : null;
+
+            var distM = (pt && _driverRouteLine)
+                ? turf.pointToLineDistance(pt, _driverRouteLine, { units: 'meters' })
+                : 9999;
+
+            if (distM > 70 && canForceRerouteNow()) {
+                tryReroute(lat, lng, { force: true });
+                return;
+            }
+        } catch (_) {}
+    }
+
     if (typeof turf === 'undefined') return;
-    if (!_driverRouteLine || !_driverRouteLine.geometry) return;
+    if (!_driverRouteLine || !_driverRouteLine.geometry) {
+        if (appState === 'trip' && canForceRerouteNow()) {
+            tryReroute(lat, lng, { force: true });
+        }
+        return;
+    }
     if (!ORDER_DATA ||
         !isValidCoord(ORDER_DATA.destination_latitude, ORDER_DATA.destination_longitude)) return;
     try {
@@ -2175,12 +2235,10 @@ function checkOffRoute(lat, lng, speed) {
             { units: 'meters' }
         );
         if (distM > 70) {
-            tryReroute(lat, lng).then(function(triggered) {
-                if (triggered) {
-                    _offRouteCount = 0;
-                }
-            });
-            return; // prevent second reroute call below
+            if (appState === 'trip' && canForceRerouteNow()) {
+                tryReroute(lat, lng, { force: true });
+            }
+            return;
         }
         if (distM >= OFF_ROUTE_THRESHOLD_M) {
             _offRouteCount++;
