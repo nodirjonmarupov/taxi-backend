@@ -2,6 +2,12 @@
     var tg = (window.Telegram && window.Telegram.WebApp) ? window.Telegram.WebApp : null;
     if (tg) {
         try { tg.ready(); tg.expand(); } catch (_) {}
+        if (window.Telegram?.WebApp) {
+            try {
+                Telegram.WebApp.expand();
+                Telegram.WebApp.enableClosingConfirmation();
+            } catch (_) {}
+        }
     }
     if (location.protocol !== 'https:' && location.hostname !== 'localhost' && location.hostname.indexOf('127.') !== 0) {
         document.body.innerHTML = '<div style="padding:24px;text-align:center;font-size:16px;">Geolocation faqat HTTPS da ishlaydi. Iltimos, xavfsiz manzil orqali oching.</div>';
@@ -25,6 +31,7 @@ let _driverRouteLine = null;       // turf.lineString ??[lon,lat] koordinatlarda
 let _driverRouteCoords = [];       // [[lon,lat], ...] — route polyline (GeoJSON tartib)
 let _smoothedRouteCoords = null;
 let _routeHash = null;
+let _smoothedCoordsHash = null;
 let arrowEl = null;
 let tLat = null, tLng = null, dLat = null, dLng = null, brg = 0, spd = 0;
 let pLat = null, pLng = null, locked = true;
@@ -36,6 +43,7 @@ let _lastCamLat = null, _lastCamLng = null, _lastCamBrg = 0, _lastCamZoom = 0;
 let _camLat = null;
 let _camLng = null;
 let _lastCamUpdate = 0;
+let _userZooming = false;
 let _velLat = 0, _velLng = 0;
 let _smoothVelLat = 0, _smoothVelLng = 0;
 let _gpsAnchorLat = null, _gpsAnchorLng = null, _gpsAnchorMs = 0;
@@ -62,7 +70,7 @@ let _routeFetchCache = null;
 var ROUTE_MIN_API_SEGMENT_M = 50;
 var ROUTE_SAME_ENDPOINT_M = 10;
 var ROUTE_CACHE_NEAR_M = 50;
-var OFF_ROUTE_THRESHOLD_M = 60;
+var OFF_ROUTE_THRESHOLD_M = 45;
 let _lastProgressLat = null;
 let _lastProgressLng = null;
 let _lastProgressAnchorIdx = null;
@@ -72,6 +80,21 @@ let _dispLat = null;
 let _dispLng = null;
 let _dispArrowDeg = null;
 let _wakeLock = null;
+let _keepAliveInterval = null;
+function enableFallbackKeepAlive() {
+    if (_keepAliveInterval) return;
+    _keepAliveInterval = setInterval(() => {
+        // minimal no-op to keep WebView active
+        document.body.style.opacity =
+            document.body.style.opacity === '1' ? '0.99' : '1';
+    }, 20000);
+}
+function disableFallbackKeepAlive() {
+    if (_keepAliveInterval) {
+        clearInterval(_keepAliveInterval);
+        _keepAliveInterval = null;
+    }
+}
 let northUpMode = false;
 let isManualMode = false, gestureStartAngle = null, gestureStartBearing = 0, manualBearing = 0, manualModeTimer = null, useManualBearing = false;
 let renderLoopRunning = false;
@@ -248,24 +271,24 @@ async function enableWakeLock() {
     try {
         if ('wakeLock' in navigator && !_wakeLock) {
             _wakeLock = await navigator.wakeLock.request('screen');
-            _wakeLock.addEventListener('release', function() {
+            _wakeLock.addEventListener('release', function () {
                 _wakeLock = null;
             });
+        } else {
+            enableFallbackKeepAlive();
         }
     } catch (err) {
         console.warn('WakeLock failed', err);
+        enableFallbackKeepAlive();
     }
 }
 
-async function disableWakeLock() {
-    try {
-        if (_wakeLock) {
-            await _wakeLock.release();
-            _wakeLock = null;
-        }
-    } catch (err) {
-        console.warn('WakeLock release failed', err);
+function disableWakeLock() {
+    if (_wakeLock) {
+        try { _wakeLock.release(); } catch (_) {}
+        _wakeLock = null;
     }
+    disableFallbackKeepAlive();
 }
 
 function sendTripUpdate() {
@@ -497,12 +520,22 @@ function initGoogleMap(initialLat, initialLng) {
         zoom: 17,
         disableDefaultUI: true,
         gestureHandling: 'greedy',
+        zoomControl: true,
+        disableDoubleClickZoom: false,
+        scrollwheel: true,
         clickableIcons: false,
         mapTypeId: 'roadmap',
         renderingType: google.maps.RenderingType.VECTOR,
         tilt: 45,
         heading: 0,
         isFractionalZoomEnabled: true
+    });
+    map.addListener('zoom_changed', function () {
+        _userZooming = true;
+
+        setTimeout(function () {
+            _userZooming = false;
+        }, 2000);
     });
     // Attempt to hide POIs/transit. In VECTOR mode this may be ignored (acceptable).
     try {
@@ -597,8 +630,9 @@ function pathLatLngFromLngLatPairs(coordsLL) {
 }
 function setMainRoutePolylineFromDriverCoords() {
     if (!_driverRouteCoords || _driverRouteCoords.length < 2) return;
-    if (!_smoothedRouteCoords || _smoothedRouteCoords.length !== _driverRouteCoords.length) {
-        _smoothedRouteCoords = smoothCoords(_driverRouteCoords, 2);
+    if (!_smoothedRouteCoords || _smoothedCoordsHash !== _routeHash) {
+        _smoothedRouteCoords = smoothCoords(_driverRouteCoords, 1);
+        _smoothedCoordsHash = _routeHash;
     }
     var path = pathLatLngFromLngLatPairs(_smoothedRouteCoords);
     if (path.length) setGoogleRoutePolyline(path);
@@ -885,27 +919,47 @@ function renderLoop() {
         }
 
         if (_driverRouteLine && _driverRouteCoords && _driverRouteCoords.length > 1 && typeof turf !== 'undefined') {
+            var rawLat = dLat;
+            var rawLng = dLng;
+
+            var distM = 0;
+
             try {
-                var snap = turf.nearestPointOnLine(_driverRouteLine, turf.point([dLng, dLat]));
+                var pt = turf.point([rawLng, rawLat]);
+                var snap = turf.nearestPointOnLine(_driverRouteLine, pt, { units: 'kilometers' });
+
                 if (snap && snap.geometry && snap.geometry.coordinates) {
-                    dLng = snap.geometry.coordinates[0];
-                    dLat = snap.geometry.coordinates[1];
+                    if (snap.properties && typeof snap.properties.dist === 'number') {
+                        distM = snap.properties.dist * 1000;
+                    } else {
+                        distM = 9999; // force RAW GPS fallback
+                    }
 
-                    if (snap.properties && snap.properties.index != null) {
-                        var maxIdx = _driverRouteCoords.length > 1 ? _driverRouteCoords.length - 2 : 0;
-                        var newIdx = Math.min(snap.properties.index, maxIdx);
+                    // SNAP ONLY if close to route
+                    if (distM < 20) {
+                        dLng = snap.geometry.coordinates[0];
+                        dLat = snap.geometry.coordinates[1];
 
-                        if (typeof _routeAnchorIdx !== 'number' || isNaN(_routeAnchorIdx)) {
-                            _routeAnchorIdx = newIdx;
-                        } else {
-                            var diff = newIdx - _routeAnchorIdx;
+                        if (snap.properties && snap.properties.index != null) {
+                            var maxIdx = _driverRouteCoords.length > 1 ? _driverRouteCoords.length - 2 : 0;
+                            var newIdx = Math.min(snap.properties.index, maxIdx);
 
-                            if (diff >= 0 && diff <= 3) {
+                            if (typeof _routeAnchorIdx !== 'number' || isNaN(_routeAnchorIdx)) {
                                 _routeAnchorIdx = newIdx;
-                            } else if (diff < 0 && Math.abs(diff) > 5) {
-                                _routeAnchorIdx = newIdx;
+                            } else {
+                                var diff = newIdx - _routeAnchorIdx;
+
+                                if (diff >= 0 && diff <= 3) {
+                                    _routeAnchorIdx = newIdx;
+                                } else if (diff < 0 && Math.abs(diff) > 5) {
+                                    _routeAnchorIdx = newIdx;
+                                }
                             }
                         }
+                    } else {
+                        // use RAW GPS if far
+                        dLng = rawLng;
+                        dLat = rawLat;
                     }
                 }
             } catch (_) {}
@@ -1026,7 +1080,7 @@ function renderLoop() {
                 (_moved || _brgDelta > 2 || _zoomDelta > 0.1 || _timeForced)) {
                 if (Date.now() >= _camBlockUntil) {
                     var currentHeading = displayHeading;
-                    if (map.getZoom && map.getZoom() < 17) {
+                    if (!_userZooming && map.getZoom && map.getZoom() < 17) {
                         map.setZoom(17);
                     }
                     updateCamera(dLat, dLng, currentHeading);
@@ -2064,8 +2118,8 @@ function fallbackStraightLine(fromLat, fromLng, toLat, toLng) {
     }
 }
 
-/** Reroute-only: 10s cooldown between allowed Google Directions calls (cost control). */
-var ROUTE_REROUTE_COOLDOWN_MS = 10000;
+/** Reroute-only: 4s cooldown between allowed Google Directions calls (cost control). */
+var ROUTE_REROUTE_COOLDOWN_MS = 4000;
 function shouldReroute() {
     var now = Date.now();
     if (now - _lastRerouteTime < ROUTE_REROUTE_COOLDOWN_MS) return false;
@@ -2076,7 +2130,7 @@ function shouldReroute() {
 /**
  * Off-route detection: called after every GPS update during a trip.
  * Uses turf.pointToLineDistance from the raw GPS fix to _driverRouteLine.
- * Requires two consecutive samples >= OFF_ROUTE_THRESHOLD_M before tryReroute (reduces GPS spike false positives).
+ * Requires consecutive samples >= OFF_ROUTE_THRESHOLD_M before tryReroute (reduces GPS spike false positives).
  * tryReroute applies cooldown, in-flight guard, then drawRoute.
  */
 async function tryReroute(lat, lng) {
@@ -2114,21 +2168,27 @@ function checkOffRoute(lat, lng, speed) {
     if (!_driverRouteLine || !_driverRouteLine.geometry) return;
     if (!ORDER_DATA ||
         !isValidCoord(ORDER_DATA.destination_latitude, ORDER_DATA.destination_longitude)) return;
-    if (typeof speed !== 'undefined' && speed !== null && !isNaN(speed) && speed < 3) return;
-
     try {
         var distM = turf.pointToLineDistance(
             turf.point([lng, lat]),
             _driverRouteLine,
             { units: 'meters' }
         );
+        if (distM > 70) {
+            tryReroute(lat, lng).then(function(triggered) {
+                if (triggered) {
+                    _offRouteCount = 0;
+                }
+            });
+            return; // prevent second reroute call below
+        }
         if (distM >= OFF_ROUTE_THRESHOLD_M) {
             _offRouteCount++;
         } else {
             _offRouteCount = 0;
         }
 
-        if (_offRouteCount >= 2) {
+        if (_offRouteCount >= 1) {
             tryReroute(lat, lng).then(function(triggered) {
                 if (triggered) {
                     _offRouteCount = 0;
