@@ -21,6 +21,7 @@ from sqlalchemy import text
 # Ichki modullar
 from app.api.routes import webapp
 from app.api.v1 import api_router
+from app.api.payment import router as payment_router
 from app.core.config import settings
 from app.core.database import AsyncSessionLocal, init_db, close_db
 from app.core.redis import close_redis
@@ -534,6 +535,8 @@ async def lifespan(app: FastAPI) -> AsyncGenerator:
                 "is_available BOOLEAN DEFAULT FALSE",
                 "is_active BOOLEAN DEFAULT TRUE",
                 "balance NUMERIC(10,2) DEFAULT 0",
+                "phone_e164 VARCHAR(16)",
+                "balance_uzs BIGINT DEFAULT 0",
                 "min_balance_required NUMERIC(10,2) DEFAULT 10000",
                 "has_active_card BOOLEAN DEFAULT FALSE",
                 "payme_token VARCHAR(255)",
@@ -552,6 +555,35 @@ async def lifespan(app: FastAPI) -> AsyncGenerator:
                     await session.execute(text(f"ALTER TABLE drivers ADD COLUMN IF NOT EXISTS {col_def};"))
                 except Exception:
                     pass
+
+            # phone_e164 unique index (multiple NULLs allowed in Postgres)
+            try:
+                await session.execute(
+                    text("CREATE UNIQUE INDEX IF NOT EXISTS uq_drivers_phone_e164 ON drivers(phone_e164) WHERE phone_e164 IS NOT NULL;")
+                )
+            except Exception:
+                pass
+
+            # transactions table for Paynet-ready webhooks
+            try:
+                await session.execute(text("""
+                    CREATE TABLE IF NOT EXISTS transactions (
+                        id SERIAL PRIMARY KEY,
+                        provider VARCHAR(32) NOT NULL,
+                        provider_tx_id VARCHAR(128) NOT NULL,
+                        driver_id INTEGER REFERENCES drivers(id) ON DELETE CASCADE,
+                        phone_e164_snapshot VARCHAR(16) NOT NULL,
+                        amount_uzs BIGINT NOT NULL,
+                        status VARCHAR(16) NOT NULL,
+                        raw_payload TEXT NOT NULL,
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    );
+                """))
+                await session.execute(
+                    text("CREATE UNIQUE INDEX IF NOT EXISTS uq_transactions_provider_tx_id ON transactions(provider, provider_tx_id);")
+                )
+            except Exception:
+                pass
 
             # Admin uchun individual driver sozlamalari
             await session.execute(text(
@@ -757,6 +789,7 @@ async def admin_panel(response: Response):
 # Routerlarni ulash (Xatolar oldi olindi)
 app.include_router(webapp.router)
 app.include_router(api_router, prefix="/api/v1")
+app.include_router(payment_router)
 
 # /api/update_driver_location - qisqa yo'l (Redis-ga yozish)
 from app.api.routes.webapp import update_driver_location_api

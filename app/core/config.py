@@ -45,6 +45,9 @@ class Settings(BaseSettings):
     # Telegram Bot
     TELEGRAM_BOT_TOKEN: str = Field(default="")
     TELEGRAM_WEBHOOK_URL: Optional[str] = None
+
+    # Paynet webhook (future integration)
+    PAYNET_WEBHOOK_API_KEY: str = Field(default="")
     
     # Admin IDs - Telegram ID raqamlari (env: "878590210,8219777626" yoki "[878590210, 8219777626]")
     ADMIN_IDS: List[int] = [878590210, 8219777626]

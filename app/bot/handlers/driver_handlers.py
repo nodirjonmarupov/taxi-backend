@@ -45,6 +45,7 @@ from app.bot.messages import (
     DRIVER_OPEN_TAXIMETER_TEXTS,
 )
 from app.bot.lang_utils import db_lang_for_telegram
+from app.utils.phone import normalize_phone
 
 logger = get_logger(__name__)
 
@@ -515,7 +516,16 @@ async def register_license(message: Message, state: FSMContext, lang: str = "uz"
             )
             db.add(new_driver)
             user.role = UserRole.DRIVER
-            user.phone = data.get('phone')
+            _raw_phone = data.get('phone')
+            try:
+                _p = normalize_phone(_raw_phone)
+            except Exception:
+                _p = None
+            if not _p:
+                raise ValueError("Invalid phone number")
+            if _p:
+                user.phone = _p
+                new_driver.phone_e164 = _p
 
             await db.commit()
             await db.refresh(new_driver)

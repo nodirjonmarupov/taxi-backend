@@ -67,6 +67,9 @@ class Driver(Base):
     
     id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
     user_id: Mapped[int] = mapped_column(Integer, ForeignKey("users.id", ondelete="CASCADE"), unique=True, nullable=False)
+
+    phone_e164: Mapped[Optional[str]] = mapped_column(String(16), unique=True, nullable=True, index=True)
+    balance_uzs: Mapped[int] = mapped_column(BigInteger, default=0, nullable=False)
     
     car_number: Mapped[str] = mapped_column(String(20), nullable=False, index=True)
     car_model: Mapped[str] = mapped_column(String(100), nullable=False)
