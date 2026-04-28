@@ -1,4 +1,4 @@
-bb(function(){
+(function(){
     var tg = (window.Telegram && window.Telegram.WebApp) ? window.Telegram.WebApp : null;
     if (tg) {
         try { tg.ready(); tg.expand(); } catch (_) {}
