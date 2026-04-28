@@ -1,4 +1,4 @@
-(function(){
+bb(function(){
     var tg = (window.Telegram && window.Telegram.WebApp) ? window.Telegram.WebApp : null;
     if (tg) {
         try { tg.ready(); tg.expand(); } catch (_) {}
@@ -772,9 +772,9 @@ function createDriverMarkerView(map, lat, lng) {
     var circle = document.createElement('div');
     circle.className = 'dm-circle';
     var svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
-    svg.setAttribute('viewBox', '0 0 24 24');
+    svg.setAttribute('viewBox', '0 0 32 20');
     svg.setAttribute('class', 'dm-arrow');
-    svg.innerHTML = '<path d="M12 2L4.5 20.29l.71.71L12 18l6.79 3 .71-.71z"/>';
+    svg.innerHTML = '<path d="M16 1 L3 19 L16 14 L29 19 Z"/>';
     arrowEl = svg;
     circle.appendChild(svg);
     wrap.appendChild(circle);
@@ -790,6 +790,9 @@ function createDriverMarkerView(map, lat, lng) {
             wrap.style.height = '48px';
             wrap.style.marginLeft = '-24px';
             wrap.style.marginTop = '-24px';
+            circle.style.transform = 'perspective(120px) rotateX(25deg)';
+            circle.style.transformOrigin = 'center bottom';
+            circle.style.filter = 'drop-shadow(0px 4px 6px rgba(0,0,0,0.4))';
         }
     };
     overlay.draw = function() {
