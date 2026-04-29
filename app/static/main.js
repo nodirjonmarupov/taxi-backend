@@ -32,6 +32,7 @@ let _driverRouteCoords = [];       // [[lon,lat], ...] — route polyline (GeoJS
 let _smoothedRouteCoords = null;
 let _routeHash = null;
 let _smoothedCoordsHash = null;
+let _lastRouteUpdateTs = 0;
 let arrowEl = null;
 let tLat = null, tLng = null, dLat = null, dLng = null, brg = 0, spd = 0;
 let pLat = null, pLng = null, locked = true;
@@ -83,7 +84,7 @@ let _routeFetchCache = null;
 var ROUTE_MIN_API_SEGMENT_M = 50;
 var ROUTE_SAME_ENDPOINT_M = 10;
 var ROUTE_CACHE_NEAR_M = 50;
-var OFF_ROUTE_THRESHOLD_M = 45;
+var OFF_ROUTE_THRESHOLD_M = 30;
 let _lastProgressLat = null;
 let _lastProgressLng = null;
 let _lastProgressAnchorIdx = null;
@@ -653,10 +654,10 @@ function pathLatLngFromLngLatPairs(coordsLL) {
 }
 function setMainRoutePolylineFromDriverCoords() {
     if (!_driverRouteCoords || _driverRouteCoords.length < 2) return;
-    if (!_smoothedRouteCoords || _smoothedCoordsHash !== _routeHash) {
-        _smoothedRouteCoords = smoothCoords(_driverRouteCoords, 1);
-        _smoothedCoordsHash = _routeHash;
-    }
+    // Always recompute polyline geometry from latest Directions route coords
+    // to avoid stale route shapes + remove smoothing-induced drift.
+    _smoothedRouteCoords = _driverRouteCoords;
+    _smoothedCoordsHash = _routeHash;
     var path = pathLatLngFromLngLatPairs(_smoothedRouteCoords);
     if (path.length) setGoogleRoutePolyline(path);
 }
@@ -688,7 +689,7 @@ function setGoogleRoutePolyline(path) {
             strokeColor: '#C9A000',
             strokeOpacity: 0.85,
             strokeWeight: 12,
-            geodesic: true,
+            geodesic: false,
             zIndex: 1,
             lineJoin: 'round',
             lineCap: 'round'
@@ -696,7 +697,7 @@ function setGoogleRoutePolyline(path) {
         _gRoutePolyline = new google.maps.Polyline({
             path: path,
             map: map,
-            geodesic: true,
+            geodesic: false,
             strokeColor: '#FFD400',
             strokeWeight: 7,
             strokeOpacity: 1,
@@ -2028,6 +2029,7 @@ function drawRoute(from, to, opts) {
     if (_tryReuseRouteFetchCache(fromLat, fromLng, toLat, toLng)) {
         resetRouteProgress();
         _applyRouteGeometryToMap(fromLat, fromLng, toLat, toLng);
+        _lastRouteUpdateTs = Date.now();
         return Promise.resolve(true);
     }
 
@@ -2099,6 +2101,7 @@ function drawRoute(from, to, opts) {
                 return;
             }
             _applyRouteGeometryToMap(fromLat, fromLng, toLat, toLng);
+            _lastRouteUpdateTs = Date.now();
             _saveRouteFetchCache(fromLat, fromLng, toLat, toLng);
             resolve(true);
         })
@@ -2122,6 +2125,16 @@ function updateProgressiveRoute(driverLon, driverLat) {
 }
 
 function fallbackStraightLine(fromLat, fromLng, toLat, toLng) {
+    var now = Date.now();
+    var ROUTE_STALE_MS = 10000; // 10 seconds
+    if (
+        _driverRouteCoords &&
+        _driverRouteCoords.length > 5 &&
+        _lastRouteUpdateTs &&
+        (now - _lastRouteUpdateTs < ROUTE_STALE_MS)
+    ) {
+        return;
+    }
     _clearRouteFetchCache();
     routeCoordinates = [[fromLat, fromLng], [toLat, toLng]];
     // Build _driverRouteLine so the queue gate is satisfied and snapping works
@@ -2249,7 +2262,7 @@ function checkOffRoute(lat, lng, speed) {
             _offRouteCount = 0;
         }
 
-        if (_offRouteCount >= 1) {
+        if (_offRouteCount >= 3) {
             tryReroute(lat, lng).then(function(triggered) {
                 if (triggered) {
                     _offRouteCount = 0;
