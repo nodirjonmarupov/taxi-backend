@@ -2403,10 +2403,39 @@ async function handleStartTrip() {
     startTripMeterPolling();
 }
 
+let waitingUITimer = null;
+let waitingUIStart = null;
+
+function startWaitingUI() {
+    if (waitingUITimer) return;
+    waitingUIStart = Date.now();
+    waitingUITimer = setInterval(function() {
+        var el = document.getElementById('waitingTimerUI');
+        if (!el) return;
+        var diff = Math.floor((Date.now() - waitingUIStart) / 1000);
+        var m = String(Math.floor(diff / 60)).padStart(2, '0');
+        var s = String(diff % 60).padStart(2, '0');
+        el.textContent = m + ':' + s;
+    }, 1000);
+}
+
+function stopWaitingUI() {
+    if (waitingUITimer) {
+        clearInterval(waitingUITimer);
+        waitingUITimer = null;
+    }
+    waitingUIStart = null;
+    var el = document.getElementById('waitingTimerUI');
+    if (el) el.textContent = "00:00";
+}
+
 function toggleWaiting() {
-    tripData.isWaiting = !tripData.isWaiting;
+    var wasWaiting = !!tripData.isWaiting;
+    tripData.isWaiting = !wasWaiting;
     const btn = document.getElementById('waitingBtn');
     if (!btn) return;
+    if (tripData.isWaiting) startWaitingUI();
+    else stopWaitingUI();
     btn.textContent = tripData.isWaiting
         ? '▶ DAVOM ETISH'
         : '⏸ PAUZA / KUTISH';
@@ -2414,11 +2443,16 @@ function toggleWaiting() {
     var oid = (ORDER_DATA && ORDER_DATA.id != null) ? ORDER_DATA.id : ORDER_ID_CURRENT;
     if (oid && WEBAPP_TOKEN) {
         if (tripData.isWaiting) {
+            if (toggleWaiting._waitingTimer) return; // prevent duplicate timers
             fetch(API_BASE_URL + '/api/webapp/order/' + oid + '/trip/pause?v=' + Date.now(), {
                 method: 'POST',
                 headers: webappHeaders()
             }).catch(function() {});
         } else {
+            if (toggleWaiting._waitingTimer) {
+                clearTimeout(toggleWaiting._waitingTimer);
+                toggleWaiting._waitingTimer = null;
+            }
             _resumeInFlight = true;
             fetch(API_BASE_URL + '/api/webapp/order/' + oid + '/trip/resume?v=' + Date.now(), {
                 method: 'POST',

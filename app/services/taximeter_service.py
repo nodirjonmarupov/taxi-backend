@@ -112,8 +112,11 @@ def compute_fare(
     if ws <= 0:
         waiting_part = Decimal("0")
     else:
-        extra_blocks = int(floor((ws - 1.0) / 60.0))
-        waiting_part = Decimal("1000") + Decimal(str(extra_blocks)) * Decimal("500")
+        if ws < 60.0:
+            waiting_part = Decimal("0")
+        else:
+            extra_minutes = int(floor((ws - 60.0) / 60.0))
+            waiting_part = Decimal("1000") + Decimal(str(extra_minutes)) * Decimal("500")
     distance_part = d_km * km_p * surge
     base_part = min_price
     total = base_part + distance_part + waiting_part
