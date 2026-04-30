@@ -21,6 +21,8 @@ let ORDER_DATA = null;
 const tg = (window.Telegram && window.Telegram.WebApp) ? window.Telegram.WebApp : { expand: function(){}, ready: function(){} };
 
 let map, driverMarker, clientMarker, destMarker;
+let directionsService = null;
+let directionsRenderer = null;
 let _gRoutePolyline = null;
 let _gRouteShadow = null;
 let _gRouteAbPolyline = null;
@@ -33,6 +35,9 @@ let _smoothedRouteCoords = null;
 let _routeHash = null;
 let _smoothedCoordsHash = null;
 let _lastRouteUpdateTs = 0;
+let __lastRerouteTs = 0;
+let _lastRerouteLat = null;
+let _lastRerouteLng = null;
 let arrowEl = null;
 let tLat = null, tLng = null, dLat = null, dLng = null, brg = 0, spd = 0;
 let pLat = null, pLng = null, locked = true;
@@ -63,6 +68,7 @@ let _lastDist = null;
 let _displayArrowBrg = null;
 let _lastStableLat = null;
 let _lastStableLng = null;
+let isSnapped = false;
 let _pendingGps = null;    // queued GPS update received before _driverRouteLine was ready
 let _snapRouteLine = null;  // mirror of full _driverRouteLine (no progressive trim)
 let _offRouteCount = 0;       // consecutive GPS samples past off-route threshold (noise filter)
@@ -544,6 +550,18 @@ function initGoogleMap(initialLat, initialLng) {
         heading: 0,
         isFractionalZoomEnabled: true
     });
+    try {
+        directionsService = new google.maps.DirectionsService();
+        directionsRenderer = new google.maps.DirectionsRenderer({
+            suppressMarkers: true,
+            preserveViewport: true,
+            polylineOptions: {
+                strokeColor: "#FFD400",
+                strokeWeight: 6
+            }
+        });
+        directionsRenderer.setMap(map);
+    } catch (_) {}
     if (!_zoomInitialized) {
         try { map.setZoom(17); } catch (_) {}
         _zoomInitialized = true;
@@ -654,6 +672,7 @@ function pathLatLngFromLngLatPairs(coordsLL) {
 }
 function setMainRoutePolylineFromDriverCoords() {
     if (!_driverRouteCoords || _driverRouteCoords.length < 2) return;
+    if (directionsRenderer) return; // Google renders the route visually; keep OSRM for logic only
     // Always recompute polyline geometry from latest Directions route coords
     // to avoid stale route shapes + remove smoothing-induced drift.
     _smoothedRouteCoords = _driverRouteCoords;
@@ -682,6 +701,13 @@ function smoothCoords(coords, factor) {
 }
 function setGoogleRoutePolyline(path) {
     if (!map || !_mapsJsReady() || !path || !path.length) return;
+    if (directionsRenderer) {
+        try { if (_gRoutePolyline) _gRoutePolyline.setMap(null); } catch (_) {}
+        try { if (_gRouteShadow) _gRouteShadow.setMap(null); } catch (_) {}
+        _gRoutePolyline = null;
+        _gRouteShadow = null;
+        return;
+    }
     if (!_gRoutePolyline) {
         _gRouteShadow = new google.maps.Polyline({
             path: path,
@@ -716,6 +742,11 @@ function setGoogleRoutePolyline(path) {
 }
 function setGoogleRouteABPolyline(path) {
     if (!map || !_mapsJsReady() || !path || !path.length) return;
+    if (directionsRenderer) {
+        try { if (_gRouteAbPolyline) _gRouteAbPolyline.setMap(null); } catch (_) {}
+        _gRouteAbPolyline = null;
+        return;
+    }
     if (!_gRouteAbPolyline) {
         _gRouteAbPolyline = new google.maps.Polyline({
             path: path,
@@ -966,8 +997,15 @@ function renderLoop() {
                         distM = 9999; // force RAW GPS fallback
                     }
 
-                    // SNAP ONLY if close to route
-                    if (distM < 20) {
+                    // Snap hysteresis: avoid snap/raw flapping near threshold.
+                    if (!isSnapped && distM < 20) {
+                        isSnapped = true;
+                    }
+                    if (isSnapped && distM > 30) {
+                        isSnapped = false;
+                    }
+
+                    if (isSnapped) {
                         dLng = snap.geometry.coordinates[0];
                         dLat = snap.geometry.coordinates[1];
 
@@ -1039,14 +1077,6 @@ function renderLoop() {
         var _headDecay = Math.exp(-dt / _tauHead);
         var _hdShortcut = ((brg - displayHeading + 540) % 360) - 180;
         displayHeading = (displayHeading + _hdShortcut * (1 - _headDecay) + 360) % 360;
-        console.log(
-            '[FRAME]',
-            'spd=', spd,
-            'move(m)=', (_lastDbgLat != null ? _moveMHead.toFixed(2) : 'na'),
-            'brg=', (typeof brg === 'number' ? brg.toFixed(1) : 'na'),
-            'head=', (typeof displayHeading === 'number' ? displayHeading.toFixed(1) : 'na'),
-            'anchor=', _routeAnchorIdx
-        );
         _lastDbgLat = dLat;
         _lastDbgLng = dLng;
 
@@ -2020,6 +2050,32 @@ function drawRoute(from, to, opts) {
         return Promise.resolve(true);
     }
 
+    try {
+        let shouldCallGoogle = true;
+        if (segM < 50) {
+            shouldCallGoogle = false;
+        }
+        if (
+            window.__lastRouteTs &&
+            Date.now() - window.__lastRouteTs < 10000 &&
+            !opts?.fromReroute
+        ) {
+            shouldCallGoogle = false;
+        }
+        if (shouldCallGoogle && directionsService && directionsRenderer) {
+            window.__lastRouteTs = Date.now();
+            directionsService.route({
+                origin: { lat: fromLat, lng: fromLng },
+                destination: { lat: toLat, lng: toLng },
+                travelMode: google.maps.TravelMode.DRIVING
+            }, function(result, status) {
+                if (status === 'OK' && result) {
+                    try { directionsRenderer.setDirections(result); } catch (_) {}
+                }
+            });
+        }
+    } catch (_) {}
+
     var oid = getTripOrderIdForApi();
     if (!oid) {
         fallbackStraightLine(fromLat, fromLng, toLat, toLng);
@@ -2180,8 +2236,36 @@ function shouldReroute() {
  * tryReroute applies cooldown, in-flight guard, then drawRoute.
  */
 async function tryReroute(lat, lng, opts = {}) {
+    if (Date.now() - __lastRerouteTs < 5000) {
+        return false;
+    }
     if (_rerouteInFlight && !opts?.force) return false;
     if (!opts.force && !shouldReroute()) return false;
+    // dynamic threshold based on speed
+    var speed = (typeof spd === "number") ? spd : 0;
+    var thr = speed < 10 ? 120 : 80;
+
+    // distance from last reroute
+    var moved = (_lastRerouteLat != null && _lastRerouteLng != null)
+        ? haversineM(lat, lng, _lastRerouteLat, _lastRerouteLng)
+        : 999999;
+
+    // distance from route (same metric as checkOffRoute)
+    var offRouteDist = (typeof turf !== 'undefined' && _driverRouteLine)
+        ? turf.pointToLineDistance(turf.point([lng, lat]), _driverRouteLine, { units: 'meters' })
+        : 999999;
+
+    if (Date.now() - __lastRerouteTs < 20000) {
+        // block only if small movement AND still near route
+        if (moved < thr && offRouteDist < OFF_ROUTE_THRESHOLD_M) {
+            return false;
+        }
+    }
+
+    // update reroute tracking
+    __lastRerouteTs = Date.now();
+    _lastRerouteLat = lat;
+    _lastRerouteLng = lng;
 
     _rerouteInFlight = true;
     try {
