@@ -22,8 +22,6 @@ let ORDER_DATA = null;
 const tg = (window.Telegram && window.Telegram.WebApp) ? window.Telegram.WebApp : { expand: function(){}, ready: function(){} };
 
 let map, driverMarker, clientMarker, destMarker;
-let directionsService = null;
-let directionsRenderer = null;
 let _gRoutePolyline = null;
 let _gRouteShadow = null;
 let _gRouteAbPolyline = null;
@@ -551,20 +549,6 @@ function initGoogleMap(initialLat, initialLng) {
         heading: 0,
         isFractionalZoomEnabled: true
     });
-    try {
-        directionsService = new google.maps.DirectionsService();
-        directionsRenderer = new google.maps.DirectionsRenderer({
-            suppressMarkers: true,
-            preserveViewport: true,
-            polylineOptions: {
-                strokeColor: "#FFD400",
-                strokeWeight: 6,
-                strokeOpacity: 1,
-                zIndex: 999
-            }
-        });
-        directionsRenderer.setMap(map);
-    } catch (_) {}
     if (!_zoomInitialized) {
         try { map.setZoom(17); } catch (_) {}
         _zoomInitialized = true;
@@ -675,13 +659,6 @@ function pathLatLngFromLngLatPairs(coordsLL) {
 }
 function setMainRoutePolylineFromDriverCoords() {
     if (!_driverRouteCoords || _driverRouteCoords.length < 2) return;
-    if (
-        directionsRenderer &&
-        directionsRenderer.getDirections &&
-        directionsRenderer.getDirections()
-    ) {
-        return;
-    }
     // Always recompute polyline geometry from latest Directions route coords
     // to avoid stale route shapes + remove smoothing-induced drift.
     _smoothedRouteCoords = _driverRouteCoords;
@@ -710,13 +687,6 @@ function smoothCoords(coords, factor) {
 }
 function setGoogleRoutePolyline(path) {
     if (!map || !_mapsJsReady() || !path || !path.length) return;
-    if (directionsRenderer) {
-        try { if (_gRoutePolyline) _gRoutePolyline.setMap(null); } catch (_) {}
-        try { if (_gRouteShadow) _gRouteShadow.setMap(null); } catch (_) {}
-        _gRoutePolyline = null;
-        _gRouteShadow = null;
-        return;
-    }
     if (!_gRoutePolyline) {
         _gRouteShadow = new google.maps.Polyline({
             path: path,
@@ -751,11 +721,6 @@ function setGoogleRoutePolyline(path) {
 }
 function setGoogleRouteABPolyline(path) {
     if (!map || !_mapsJsReady() || !path || !path.length) return;
-    if (directionsRenderer) {
-        try { if (_gRouteAbPolyline) _gRouteAbPolyline.setMap(null); } catch (_) {}
-        _gRouteAbPolyline = null;
-        return;
-    }
     if (!_gRouteAbPolyline) {
         _gRouteAbPolyline = new google.maps.Polyline({
             path: path,
@@ -2058,36 +2023,6 @@ function drawRoute(from, to, opts) {
         fallbackStraightLine(fromLat, fromLng, toLat, toLng);
         return Promise.resolve(true);
     }
-
-    try {
-        let shouldCallGoogle = true;
-        if (segM < 50) {
-            shouldCallGoogle = false;
-        }
-        if (
-            window.__lastRouteTs &&
-            Date.now() - window.__lastRouteTs < 10000 &&
-            !opts?.fromReroute
-        ) {
-            shouldCallGoogle = false;
-        }
-        if (shouldCallGoogle && directionsService && directionsRenderer) {
-            window.__lastRouteTs = Date.now();
-            console.log("CALL GOOGLE ROUTE", { fromLat: fromLat, fromLng: fromLng, toLat: toLat, toLng: toLng });
-            directionsService.route({
-                origin: { lat: fromLat, lng: fromLng },
-                destination: { lat: toLat, lng: toLng },
-                travelMode: google.maps.TravelMode.DRIVING
-            }, function(result, status) {
-                console.log("GOOGLE STATUS:", status);
-                if (status === 'OK' && result) {
-                    try { directionsRenderer.setDirections(result); } catch (_) {}
-                } else {
-                    console.log("GOOGLE FAIL:", status, result);
-                }
-            });
-        }
-    } catch (_) {}
 
     var oid = getTripOrderIdForApi();
     if (!oid) {
