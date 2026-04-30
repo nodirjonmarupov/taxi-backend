@@ -14,6 +14,7 @@
         throw new Error('HTTPS required');
     }
 })();
+console.log("JS LOADED OK");
 /** Taksometr: narx faqat server /trip-meter estimated_fare dan (hardcoded tariff yo'q). */
 let TARIFF = null;
 let TARIFF_LOAD_ERROR = false;
