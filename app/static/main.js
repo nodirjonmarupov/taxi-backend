@@ -557,7 +557,9 @@ function initGoogleMap(initialLat, initialLng) {
             preserveViewport: true,
             polylineOptions: {
                 strokeColor: "#FFD400",
-                strokeWeight: 6
+                strokeWeight: 6,
+                strokeOpacity: 1,
+                zIndex: 999
             }
         });
         directionsRenderer.setMap(map);
@@ -672,7 +674,13 @@ function pathLatLngFromLngLatPairs(coordsLL) {
 }
 function setMainRoutePolylineFromDriverCoords() {
     if (!_driverRouteCoords || _driverRouteCoords.length < 2) return;
-    if (directionsRenderer) return; // Google renders the route visually; keep OSRM for logic only
+    if (
+        directionsRenderer &&
+        directionsRenderer.getDirections &&
+        directionsRenderer.getDirections()
+    ) {
+        return;
+    }
     // Always recompute polyline geometry from latest Directions route coords
     // to avoid stale route shapes + remove smoothing-induced drift.
     _smoothedRouteCoords = _driverRouteCoords;
@@ -2064,13 +2072,17 @@ function drawRoute(from, to, opts) {
         }
         if (shouldCallGoogle && directionsService && directionsRenderer) {
             window.__lastRouteTs = Date.now();
+            console.log("CALL GOOGLE ROUTE", { fromLat: fromLat, fromLng: fromLng, toLat: toLat, toLng: toLng });
             directionsService.route({
                 origin: { lat: fromLat, lng: fromLng },
                 destination: { lat: toLat, lng: toLng },
                 travelMode: google.maps.TravelMode.DRIVING
             }, function(result, status) {
+                console.log("GOOGLE STATUS:", status);
                 if (status === 'OK' && result) {
                     try { directionsRenderer.setDirections(result); } catch (_) {}
+                } else {
+                    console.log("GOOGLE FAIL:", status, result);
                 }
             });
         }
