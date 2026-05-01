@@ -659,12 +659,12 @@ function pathLatLngFromLngLatPairs(coordsLL) {
 }
 function setMainRoutePolylineFromDriverCoords() {
     if (!_driverRouteCoords || _driverRouteCoords.length < 2) return;
-    // Always recompute polyline geometry from latest Directions route coords
-    // to avoid stale route shapes + remove smoothing-induced drift.
-    _smoothedRouteCoords = _driverRouteCoords;
-    _smoothedCoordsHash = _routeHash;
-    var path = pathLatLngFromLngLatPairs(_smoothedRouteCoords);
-    if (path.length) setGoogleRoutePolyline(path);
+    if (!_smoothedRouteCoords || _smoothedCoordsHash !== _routeHash) {
+        _smoothedRouteCoords = _driverRouteCoords;
+        _smoothedCoordsHash = _routeHash;
+        var path = pathLatLngFromLngLatPairs(_smoothedRouteCoords);
+        if (path.length) setGoogleRoutePolyline(path);
+    }
 }
 function smoothCoords(coords, factor) {
     var out = [];
@@ -2250,28 +2250,8 @@ async function tryReroute(lat, lng, opts = {}) {
 }
 
 function checkOffRoute(lat, lng, speed) {
-    if (appState === 'trip') {
-        try {
-            var pt = (typeof turf !== 'undefined')
-                ? turf.point([lng, lat])
-                : null;
-
-            var distM = (pt && _driverRouteLine)
-                ? turf.pointToLineDistance(pt, _driverRouteLine, { units: 'meters' })
-                : 9999;
-
-            if (distM > 70 && canForceRerouteNow()) {
-                tryReroute(lat, lng, { force: true });
-                return;
-            }
-        } catch (_) {}
-    }
-
     if (typeof turf === 'undefined') return;
     if (!_driverRouteLine || !_driverRouteLine.geometry) {
-        if (appState === 'trip' && canForceRerouteNow()) {
-            tryReroute(lat, lng, { force: true });
-        }
         return;
     }
     if (!ORDER_DATA ||
@@ -2282,23 +2262,14 @@ function checkOffRoute(lat, lng, speed) {
             _driverRouteLine,
             { units: 'meters' }
         );
-        if (distM > 70) {
-            if (appState === 'trip' && canForceRerouteNow()) {
-                tryReroute(lat, lng, { force: true });
-            }
-            return;
-        }
         if (distM >= OFF_ROUTE_THRESHOLD_M) {
             _offRouteCount++;
         } else {
             _offRouteCount = 0;
         }
-
-        if (_offRouteCount >= 3) {
+        if (_offRouteCount >= 1) {
             tryReroute(lat, lng).then(function(triggered) {
-                if (triggered) {
-                    _offRouteCount = 0;
-                }
+                if (triggered) { _offRouteCount = 0; }
             });
         }
     } catch (_) {}
