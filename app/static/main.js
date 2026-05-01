@@ -34,6 +34,7 @@ let _smoothedRouteCoords = null;
 let _routeHash = null;
 let _smoothedCoordsHash = null;
 let _lastRouteUpdateTs = 0;
+let _routeRequestId = 0;
 let __lastRerouteTs = 0;
 let _lastRerouteLat = null;
 let _lastRerouteLng = null;
@@ -1951,6 +1952,8 @@ function _applyRouteGeometryToMap(fromLat, fromLng, toLat, toLng) {
     }
     if (typeof turf !== 'undefined' && _driverRouteCoords.length >= 2) {
         try { _driverRouteLine = turf.lineString(_driverRouteCoords); } catch (_) {}
+        isSnapped = false;
+        _routeAnchorIdx = 0;
     }
     _snapRouteLine = _driverRouteLine;
     if (typeof turf !== 'undefined' && _driverRouteLine && dLat !== null) {
@@ -2003,6 +2006,7 @@ function drawRoute(from, to, opts) {
     if (!map || !from || !to) return Promise.resolve(false);
     if (_routeInFlight && !opts?.fromReroute) return Promise.resolve(false);
     if (_rerouteInFlight && !opts.fromReroute) return Promise.resolve(false);
+    const requestId = ++_routeRequestId;
 
     // from: L.LatLng yoki {lat, lng} bo?쁫ishi mumkin
     var fromLat = from.lat != null ? from.lat : from[0];
@@ -2060,6 +2064,10 @@ function drawRoute(from, to, opts) {
         .then(function(r) { return r.json().then(function(data) { return { httpOk: r.ok, data: data }; }); })
         .then(function(wrapped) {
             clearTimeout(timeoutId);
+            if (requestId !== _routeRequestId) {
+                resolve(false);
+                return;
+            }
             var data = wrapped && wrapped.data;
             var stripHtml = function(s) {
                 if (!s) return '';
@@ -2089,9 +2097,12 @@ function drawRoute(from, to, opts) {
             }).filter(function(c) {
                 return !isNaN(c[0]) && !isNaN(c[1]) && isValidCoord(c[1], c[0]);
             });
-            var newHash = _driverRouteCoords.length + ':' +
-                (_driverRouteCoords.length ? _driverRouteCoords[0] : '') + ':' +
-                (_driverRouteCoords.length ? _driverRouteCoords[_driverRouteCoords.length - 1] : '');
+            var len = _driverRouteCoords.length;
+            var midIdx = Math.floor(len / 2);
+            var newHash = len + ':' +
+                (_driverRouteCoords[0] || '') + ':' +
+                (_driverRouteCoords[midIdx] || '') + ':' +
+                (_driverRouteCoords[len - 1] || '');
             if (_routeHash !== newHash) {
                 _smoothedRouteCoords = null;
                 _routeHash = newHash;
@@ -2111,6 +2122,10 @@ function drawRoute(from, to, opts) {
         })
         .catch(function(err) {
             clearTimeout(timeoutId);
+            if (requestId !== _routeRequestId) {
+                reject(false);
+                return;
+            }
             _clearRouteFetchCache();
             try {
                 fallbackStraightLine(fromLat, fromLng, toLat, toLng);
@@ -2119,7 +2134,9 @@ function drawRoute(from, to, opts) {
         });
     });
     return p.finally(function() {
-        _routeInFlight = false;
+        if (requestId === _routeRequestId) {
+            _routeInFlight = false;
+        }
     });
 }
 

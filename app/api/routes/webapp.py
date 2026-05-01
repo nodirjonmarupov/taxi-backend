@@ -260,6 +260,29 @@ async def driving_directions(
         if not _valid_coord(float(la), float(lo)):
             return {"ok": False, "error": "invalid_coordinates", "coordinates": [], "distance_km": 0.0, "instructions": []}
 
+    redis = get_redis()
+    origin_key = f"{round(origin_lat, 5)}_{round(origin_lng, 5)}"
+    dest_key = f"{round(dest_lat, 5)}_{round(dest_lng, 5)}"
+    cache_key = f"route_cache:{origin_key}:{dest_key}"
+
+    cached = redis.get(cache_key) if redis else None
+    if cached:
+        try:
+            return json.loads(cached)
+        except Exception:
+            pass
+
+    rate_key = f"route_rate:{order_id}"
+    ok = redis.set(rate_key, "1", nx=True, ex=2) if redis else True
+    if not ok:
+        cached = redis.get(cache_key) if redis else None
+        if cached:
+            try:
+                return json.loads(cached)
+            except Exception:
+                pass
+        return {"ok": False, "error": "rate_limited"}
+
     # Snap destination to nearest drivable point (OSRM /nearest) for routing only.
     # IMPORTANT: Do not change original destination used by the UI pin.
     snapped_dest_lng = float(dest_lng)
@@ -347,13 +370,19 @@ async def driving_directions(
     distance_km = float(route.get("distance") or 0) / 1000.0
 
     logger.info("OSRM route OK")
-    return {
+    response = {
         "ok": True,
         "coordinates": geometry,
         "distance_km": distance_km,
         "snapped_destination": [snapped_dest_lng, snapped_dest_lat],
         "last_meters_to_destination": float(last_meters_to_destination or 0.0),
     }
+    if redis:
+        try:
+            redis.set(cache_key, json.dumps(response), ex=5)
+        except Exception:
+            pass
+    return response
 
 
 def _validate_status_transition(current: str, new_status: str, mapped: Any) -> None:
@@ -725,19 +754,29 @@ async def trip_pause(
     redis = get_redis()
     if redis is None:
         raise HTTPException(status_code=503, detail="Redis unavailable")
-    st = get_trip_state(redis, order_id)
-    if not st:
-        return {"ok": True, "active": False}
-    if int(st.get("driver_id") or 0) != driver_id:
-        raise HTTPException(status_code=403, detail="Access denied")
-    if st.get("pause_started_ts") is not None:
-        return {"ok": True, "idempotent": True}
-    now = time.time()
-    st["is_waiting"] = True
-    st["pause_started_ts"] = now
-    st["updated_at"] = now
-    set_trip_state(redis, order_id, st)
-    return {"ok": True}
+    lock_key = f"trip_lock:{order_id}"
+    ok = redis.set(lock_key, "1", nx=True, ex=2)
+    if not ok:
+        return {"ok": True, "skipped": True}
+    try:
+        st = get_trip_state(redis, order_id)
+        if not st:
+            return {"ok": True, "active": False}
+        if int(st.get("driver_id") or 0) != driver_id:
+            raise HTTPException(status_code=403, detail="Access denied")
+        if st.get("pause_started_ts") is not None:
+            return {"ok": True, "idempotent": True}
+        now = time.time()
+        st["is_waiting"] = True
+        st["pause_started_ts"] = now
+        st["updated_at"] = now
+        set_trip_state(redis, order_id, st)
+        return {"ok": True}
+    finally:
+        try:
+            redis.delete(lock_key)
+        except Exception:
+            pass
 
 
 @router.post("/order/{order_id}/trip/resume")
@@ -761,26 +800,43 @@ async def trip_resume(
     redis = get_redis()
     if redis is None:
         raise HTTPException(status_code=503, detail="Redis unavailable")
-    st = get_trip_state(redis, order_id)
-    if not st:
-        return {"ok": True, "active": False}
-    if int(st.get("driver_id") or 0) != driver_id:
-        raise HTTPException(status_code=403, detail="Access denied")
-    if st.get("pause_started_ts") is None:
-        return {"ok": True, "idempotent": True}
-    now = time.time()
-    paused = float(now) - float(st["pause_started_ts"])
-    if paused > 0:
-        st["waiting_seconds"] = float(st.get("waiting_seconds") or 0) + paused
-    st["is_waiting"] = False
-    st["pause_started_ts"] = None
-    st["updated_at"] = now
-    set_trip_state(redis, order_id, st)
-    if paused > 0:
-        prev_db = float(getattr(order, "waiting_seconds", None) or 0.0)
-        order.waiting_seconds = prev_db + float(paused)
-        await db.commit()
-    return {"ok": True}
+    lock_key = f"trip_lock:{order_id}"
+    ok = redis.set(lock_key, "1", nx=True, ex=2)
+    if not ok:
+        return {"ok": True, "skipped": True}
+    try:
+        st = get_trip_state(redis, order_id)
+        if not st:
+            return {"ok": True, "active": False}
+        if int(st.get("driver_id") or 0) != driver_id:
+            raise HTTPException(status_code=403, detail="Access denied")
+        pause_ts = st.get("pause_started_ts")
+        if pause_ts is None:
+            return {"ok": True, "idempotent": True}
+        pause_ts_val = float(pause_ts or 0)
+        pause_ts_key = int(pause_ts_val * 1000)  # millisecond precision
+        resume_key = f"resume_once:{order_id}:{pause_ts_key}"
+        ok = redis.set(resume_key, "1", nx=True, ex=60)
+        if not ok:
+            return {"ok": True, "idempotent": True}
+        now = time.time()
+        paused = float(now) - float(pause_ts)
+        if paused > 0:
+            st["waiting_seconds"] = float(st.get("waiting_seconds") or 0) + paused
+        st["is_waiting"] = False
+        st["pause_started_ts"] = None
+        st["updated_at"] = now
+        set_trip_state(redis, order_id, st)
+        if paused > 0:
+            prev_db = float(getattr(order, "waiting_seconds", None) or 0.0)
+            order.waiting_seconds = prev_db + float(paused)
+            await db.commit()
+        return {"ok": True}
+    finally:
+        try:
+            redis.delete(lock_key)
+        except Exception:
+            pass
 
 
 @router.get("/order/{order_id}/trip-meter")
@@ -993,13 +1049,23 @@ async def update_driver_location_api(
                 if str(st_ord).lower() == "in_progress":
                     oid = ongoing.id
         if redis is not None and oid is not None:
-            st = get_trip_state(redis, oid)
-            if st and int(st.get("driver_id") or 0) == body.driver_id:
-                now_ts = time.time()
-                st_after = update_distance(st, store_lat, store_lon, now_ts)
-                st_after["is_waiting"] = st_after.get("pause_started_ts") is not None
-                st_after["updated_at"] = now_ts
-                set_trip_state(redis, oid, st_after)
+            lock_key = f"trip_lock:{oid}"
+            ok = redis.set(lock_key, "1", nx=True, ex=2)
+            skip_trip_state = not ok
+            if not skip_trip_state:
+                try:
+                    st = get_trip_state(redis, oid)
+                    if st and int(st.get("driver_id") or 0) == body.driver_id:
+                        now_ts = time.time()
+                        st_after = update_distance(st, store_lat, store_lon, now_ts)
+                        st_after["is_waiting"] = st_after.get("pause_started_ts") is not None
+                        st_after["updated_at"] = now_ts
+                        set_trip_state(redis, oid, st_after)
+                finally:
+                    try:
+                        redis.delete(lock_key)
+                    except Exception:
+                        pass
         elif oid is not None:
             logger.warning(
                 f"Redis unavailable during active trip GPS update — skipping taximeter "
