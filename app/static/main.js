@@ -65,6 +65,8 @@ let _lastNavUpdate = 0;      // throttle nav UI (~10 FPS adaptive)
 let _lastPredSnapUpdate = 0; // throttle Turf prediction snap (~10 FPS)
 let _lastTurnI = null;       // DOM cache: suppress updateNavUI when nothing changed
 let _lastDist = null;
+let lastBottomUpdateTs = 0;
+let lastBottomDistance = null;
 let _displayArrowBrg = null;
 let _lastStableLat = null;
 let _lastStableLng = null;
@@ -433,6 +435,46 @@ function haversineM(lat1, lon1, lat2, lon2) {
         Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) *
         Math.sin(dLon / 2) * Math.sin(dLon / 2);
     return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+}
+
+function calculateRemainingDistance(driverLat, driverLng) {
+    if (!routeCoordinates || routeCoordinates.length < 2) return 0;
+    if (typeof _routeAnchorIdx !== 'number' || isNaN(_routeAnchorIdx)) return 0;
+    var start = Math.max(0, Math.min(_routeAnchorIdx, routeCoordinates.length - 1));
+    var curLat = driverLat != null && !isNaN(driverLat) ? driverLat : dLat;
+    var curLng = driverLng != null && !isNaN(driverLng) ? driverLng : dLng;
+    var dist = 0;
+    if (curLat != null && curLng != null && !isNaN(curLat) && !isNaN(curLng) && start < routeCoordinates.length) {
+        var next = routeCoordinates[start];
+        dist += haversineM(curLat, curLng, next[0], next[1]);
+    }
+    for (var i = start; i < routeCoordinates.length - 1; i++) {
+        var a = routeCoordinates[i];
+        var b = routeCoordinates[i + 1];
+        dist += haversineM(a[0], a[1], b[0], b[1]);
+    }
+    return dist / 1000;
+}
+
+function calculateRemainingTime(distKm) {
+    var avgSpeed = 35;
+    if (!isFinite(distKm) || distKm < 0 || avgSpeed <= 0) return 0;
+    return (distKm / avgSpeed) * 60;
+}
+
+function updateBottomPanel(remainingKm, remainingMin) {
+    if (appState !== 'arriving' && appState !== 'ready') return;
+    var distEl = document.getElementById('distanceToClient');
+    var timeEl = document.getElementById('timeToClient');
+    if (!distEl || !timeEl) return;
+    var rk = remainingKm;
+    if (rk > MAX_DISTANCE_KM || isNaN(rk)) {
+        distEl.textContent = '0.00';
+        timeEl.textContent = '0';
+        return;
+    }
+    distEl.textContent = rk.toFixed(2);
+    timeEl.textContent = String(Math.max(0, Math.round(remainingMin)));
 }
 
 function _bearing(a, b) {
@@ -1161,6 +1203,19 @@ function renderLoop() {
             var _navInterval  = spd < 5 ? 150 : 80;
             if (_nowMs - _lastNavUpdate > _navInterval) {
                 setTurnAndDistFromDriver({ lat: dLat, lng: dLng });
+                if ((appState === 'arriving' || appState === 'ready') && routeCoordinates.length >= 2) {
+                    var remainingKm = calculateRemainingDistance(dLat, dLng);
+                    remainingKm = Number(remainingKm.toFixed(2));
+                    if (lastBottomDistance !== null) {
+                        remainingKm = Math.min(remainingKm, lastBottomDistance);
+                    }
+                    lastBottomDistance = remainingKm;
+                    var remainingMin = calculateRemainingTime(remainingKm);
+                    if (_nowMs - lastBottomUpdateTs > 300) {
+                        updateBottomPanel(remainingKm, remainingMin);
+                        lastBottomUpdateTs = _nowMs;
+                    }
+                }
                 // DOM guard: skip repaint when turn index and distance haven't meaningfully changed.
                 if (turnI !== _lastTurnI || _lastDist === null || Math.abs(distKm - _lastDist) > 0.01) {
                     updateNavUI();
@@ -1605,6 +1660,20 @@ function refreshDistanceDisplay() {
     var distEl = document.getElementById('distanceToClient');
     var timeEl = document.getElementById('timeToClient');
     if (!distEl || !timeEl) return;
+    if (routeCoordinates.length >= 2 && typeof _routeAnchorIdx === 'number' && !isNaN(_routeAnchorIdx)) {
+        var dLatR = lastDriverLocation ? lastDriverLocation.lat : null;
+        var dLngR = lastDriverLocation ? lastDriverLocation.lon : null;
+        var rk = calculateRemainingDistance(dLatR, dLngR);
+        rk = Number(rk.toFixed(2));
+        if (lastBottomDistance !== null) {
+            rk = Math.min(rk, lastBottomDistance);
+        }
+        lastBottomDistance = rk;
+        var rm = calculateRemainingTime(rk);
+        updateBottomPanel(rk, rm);
+        lastBottomUpdateTs = Date.now();
+        return;
+    }
     var d = 0;
     if (lastDriverLocation && ORDER_DATA.pickup_latitude != null && ORDER_DATA.pickup_longitude != null) {
         d = haversineM(lastDriverLocation.lat, lastDriverLocation.lon, ORDER_DATA.pickup_latitude, ORDER_DATA.pickup_longitude) / 1000;
@@ -1935,18 +2004,6 @@ function updateDriverMarker(lat, lng, heading) {
                 distKm = haversineM(driverPos.lat, driverPos.lng, ORDER_DATA.pickup_latitude, ORDER_DATA.pickup_longitude) / 1000;
             }
         }
-        if (appState === 'arriving' || appState === 'ready') {
-            var clPos = (clientMarker && clientMarker.getLngLat) ? clientMarker.getLngLat() : { lat: ORDER_DATA.pickup_latitude, lng: ORDER_DATA.pickup_longitude };
-            if (clPos) {
-                var straightM = haversineM(driverPos.lat, driverPos.lng, clPos.lat, clPos.lng);
-                var d = (routeRoadDistanceKm != null && routeRoadDistanceKm > 0) ? routeRoadDistanceKm : (straightM / 1000);
-                if (d > MAX_DISTANCE_KM || d < 0 || isNaN(d)) d = 0;
-                var distEl = document.getElementById('distanceToClient');
-                var timeEl = document.getElementById('timeToClient');
-                if (distEl) distEl.textContent = d > MAX_DISTANCE_KM ? '0.00' : d.toFixed(2);
-                if (timeEl) timeEl.textContent = d > MAX_DISTANCE_KM ? '??' : '~' + Math.max(1, Math.round(d / AVG_SPEED_KMH * 60));
-            }
-        }
         // Trip o'lchovi (taximeter) masofasi: faqat server /trip-meter dan (tripData.distance).
         // Mahalliy segment qo'shish olib tashlangan — aks holda client sum > Redis sum bo'lib,
         // keyingi poll display ni orqaga sakratardi (masalan 7 -> 3).
@@ -2005,6 +2062,8 @@ function tick() {
 function resetRouteProgress() {
     _lastProgressAnchorIdx = null;
     _currentInstructionIndex = 0;
+    lastBottomDistance = null;
+    lastBottomUpdateTs = 0;
 }
 
 function _clearRouteFetchCache() {
