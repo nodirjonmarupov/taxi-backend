@@ -66,9 +66,18 @@ async def compute_server_final_price_for_completion(
         tariff = PricingService.build_tariff_snapshot_from_settings(s_cfg)
 
     try:
-        w_sec = float(getattr(order, "waiting_seconds", 0) or 0)
+        ws_stored = float(getattr(order, "waiting_seconds", 0) or 0)
     except (TypeError, ValueError):
-        w_sec = 0.0
+        ws_stored = 0.0
+    pts = getattr(order, "pause_started_ts", None)
+    if pts is not None:
+        try:
+            live_paused = max(0.0, time.time() - float(pts))
+        except (TypeError, ValueError):
+            live_paused = 0.0
+        w_sec = ws_stored + live_paused
+    else:
+        w_sec = ws_stored
 
     computed = compute_fare(tariff, d_km, w_sec)
     logger.warning(

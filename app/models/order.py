@@ -47,6 +47,8 @@ class Order(Base):
     waiting_seconds: Mapped[Optional[float]] = mapped_column(
         Float, nullable=True, server_default="0"
     )
+    # Manual pause start (Unix ts, float) — Redis bilan bir vaqtda DB ga yoziladi (billing fallback)
+    pause_started_ts: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
 
     last_lat: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     last_lon: Mapped[Optional[float]] = mapped_column(Float, nullable=True)

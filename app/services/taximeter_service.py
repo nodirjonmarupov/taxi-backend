@@ -286,7 +286,7 @@ async def accumulate_order_distance_for_driver(
 
     new_total = float(order.distance_km or 0) + seg_km
     if new_total > 1000:
-        new_total = 0.0
+        new_total = 1000.0
 
     await db.execute(
         update(Order)

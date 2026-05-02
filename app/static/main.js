@@ -435,6 +435,71 @@ function haversineM(lat1, lon1, lat2, lon2) {
     return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
 }
 
+function _bearing(a, b) {
+    var lat1 = a[0] * Math.PI / 180;
+    var lat2 = b[0] * Math.PI / 180;
+    var dLng = (b[1] - a[1]) * Math.PI / 180;
+
+    var y = Math.sin(dLng) * Math.cos(lat2);
+    var x = Math.cos(lat1) * Math.sin(lat2) -
+        Math.sin(lat1) * Math.cos(lat2) * Math.cos(dLng);
+
+    var brng = Math.atan2(y, x) * 180 / Math.PI;
+    return (brng + 360) % 360;
+}
+
+function _normalizeAngle(deg) {
+    while (deg > 180) deg -= 360;
+    while (deg <= -180) deg += 360;
+    return deg;
+}
+
+function buildPolylineManeuvers(coords) {
+    if (!coords || coords.length < 1) return [];
+    if (coords.length < 3) {
+        return [{
+            text: "Manzilga yetdingiz",
+            type: -1,
+            index: coords.length - 1
+        }];
+    }
+
+    var TURN_MIN_DEG = 25;
+    var maneuvers = [];
+
+    for (var i = 1; i < coords.length - 1; i++) {
+        var A = coords[i - 1];
+        var B = coords[i];
+        var C = coords[i + 1];
+
+        var b1 = _bearing(A, B);
+        var b2 = _bearing(B, C);
+
+        var delta = _normalizeAngle(b2 - b1);
+
+        if (Math.abs(delta) < TURN_MIN_DEG) continue;
+
+        var lastIdx = maneuvers.length ? maneuvers[maneuvers.length - 1].index : -1000;
+        if (i - lastIdx < 5) continue;
+
+        var text = delta > 0 ? "Chapga buriling" : "O'ngga buriling";
+
+        maneuvers.push({
+            text: text,
+            type: 1,
+            index: i
+        });
+    }
+
+    maneuvers.push({
+        text: "Manzilga yetdingiz",
+        type: -1,
+        index: coords.length - 1
+    });
+
+    return maneuvers;
+}
+
 function circularMeanHeadings(arr) {
     if (!arr || arr.length === 0) return 0;
     var sinSum = 0, cosSum = 0;
@@ -1908,6 +1973,7 @@ function tick() {
 
 function resetRouteProgress() {
     _lastProgressAnchorIdx = null;
+    _currentInstructionIndex = 0;
 }
 
 function _clearRouteFetchCache() {
@@ -1940,6 +2006,9 @@ function _tryReuseRouteFetchCache(fromLat, fromLng, toLat, toLng) {
     });
     _driverRouteCoords = c.coordsLonLat.map(function(p) { return [p[0], p[1]]; });
     routeCoordinates = _driverRouteCoords.map(function(pt) { return [pt[1], pt[0]]; });
+    if (!routeInstructions.length) {
+        routeInstructions = buildPolylineManeuvers(routeCoordinates);
+    }
     _currentInstructionIndex = 0;
     return true;
 }
@@ -2109,6 +2178,7 @@ function drawRoute(from, to, opts) {
             }
             routeCoordinates = _driverRouteCoords.map(function(c) { return [c[1], c[0]]; }); // [lat,lng]
             resetRouteProgress();
+            routeInstructions = buildPolylineManeuvers(routeCoordinates);
             if (!routeCoordinates.length || _driverRouteCoords.length < 2) {
                 _clearRouteFetchCache();
                 fallbackStraightLine(fromLat, fromLng, toLat, toLng);
@@ -2167,8 +2237,10 @@ function fallbackStraightLine(fromLat, fromLng, toLat, toLng) {
     }
     _snapRouteLine = _driverRouteLine;
     routeRoadDistanceKm = haversineM(fromLat, fromLng, toLat, toLng) / 1000;
-    routeInstructions = [{ text: "To'g'ri yo'l", type: -1, index: 0 }];
-    _currentInstructionIndex = 0;
+    routeInstructions = buildPolylineManeuvers(routeCoordinates);
+    if (!routeInstructions.length) {
+        routeInstructions = [{ text: "To'g'ri yo'l", type: -1, index: 0 }];
+    }
     var fbPath = [
         { lat: fromLat, lng: fromLng },
         { lat: toLat, lng: toLng }

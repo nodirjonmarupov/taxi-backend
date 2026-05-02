@@ -771,6 +771,20 @@ async def trip_pause(
         st["pause_started_ts"] = now
         st["updated_at"] = now
         set_trip_state(redis, order_id, st)
+        try:
+            order.pause_started_ts = now
+            await db.commit()
+
+        except Exception:
+            try:
+                await db.rollback()
+            except Exception:
+                pass
+
+            raise HTTPException(
+                status_code=500,
+                detail="Failed to persist pause state",
+            )
         return {"ok": True}
     finally:
         try:
@@ -816,9 +830,6 @@ async def trip_resume(
         pause_ts_val = float(pause_ts or 0)
         pause_ts_key = int(pause_ts_val * 1000)  # millisecond precision
         resume_key = f"resume_once:{order_id}:{pause_ts_key}"
-        ok = redis.set(resume_key, "1", nx=True, ex=60)
-        if not ok:
-            return {"ok": True, "idempotent": True}
         now = time.time()
         paused = float(now) - float(pause_ts)
         if paused > 0:
@@ -827,10 +838,27 @@ async def trip_resume(
         st["pause_started_ts"] = None
         st["updated_at"] = now
         set_trip_state(redis, order_id, st)
-        if paused > 0:
+        try:
             prev_db = float(getattr(order, "waiting_seconds", None) or 0.0)
-            order.waiting_seconds = prev_db + float(paused)
+            if paused > 0:
+                order.waiting_seconds = prev_db + float(paused)
+            order.pause_started_ts = None
             await db.commit()
+            try:
+                redis.set(resume_key, "1", nx=True, ex=60)
+            except Exception:
+                pass
+
+        except Exception:
+            try:
+                await db.rollback()
+            except Exception:
+                pass
+
+            raise HTTPException(
+                status_code=500,
+                detail="Failed to persist billing state",
+            )
         return {"ok": True}
     finally:
         try:
