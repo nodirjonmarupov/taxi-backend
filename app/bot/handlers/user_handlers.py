@@ -26,7 +26,7 @@ from app.bot.keyboards.main_menu import get_main_keyboard
 
 logger = get_logger(__name__)
 
-MIN_BALANCE = getattr(settings, "MIN_BALANCE", 5000.0)
+MIN_BALANCE = getattr(settings, "MIN_BALANCE", -5000.0)
 
 user_router = Router()
 

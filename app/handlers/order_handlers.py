@@ -41,7 +41,7 @@ class OrderStates(StatesGroup):
     """Buyurtma tasdiqlash bosqichi (FSM)"""
     confirm_order = State()
 
-MIN_BALANCE = getattr(settings, "MIN_BALANCE", 5000.0)
+MIN_BALANCE = getattr(settings, "MIN_BALANCE", -5000.0)
 CONFIRMATION_SECONDS = 10
 
 order_router = Router()
