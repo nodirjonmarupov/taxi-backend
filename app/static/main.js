@@ -454,11 +454,22 @@ function _normalizeAngle(deg) {
     return deg;
 }
 
+function getTurnIcon(delta) {
+    if (delta > 25) return "⬅️";
+    if (delta < -25) return "➡️";
+    return "⬆️";
+}
+
+function formatDistance(meters) {
+    if (meters < 1000) return Math.round(meters) + " m";
+    return (meters / 1000).toFixed(1) + " km";
+}
+
 function buildPolylineManeuvers(coords) {
     if (!coords || coords.length < 1) return [];
     if (coords.length < 3) {
         return [{
-            text: "Manzilga yetdingiz",
+            text: "🎯 Manzilga yetdingiz",
             type: -1,
             index: coords.length - 1
         }];
@@ -482,7 +493,8 @@ function buildPolylineManeuvers(coords) {
         var lastIdx = maneuvers.length ? maneuvers[maneuvers.length - 1].index : -1000;
         if (i - lastIdx < 5) continue;
 
-        var text = delta > 0 ? "Chapga buriling" : "O'ngga buriling";
+        var icon = getTurnIcon(delta);
+        var text = icon + " " + (delta > 0 ? "Chapga buriling" : "O'ngga buriling");
 
         maneuvers.push({
             text: text,
@@ -492,7 +504,7 @@ function buildPolylineManeuvers(coords) {
     }
 
     maneuvers.push({
-        text: "Manzilga yetdingiz",
+        text: "🎯 Manzilga yetdingiz",
         type: -1,
         index: coords.length - 1
     });
@@ -1205,7 +1217,7 @@ function renderLoop() {
     });
 }
 function updateNavUI() {
-    var distM = distKm >= 1 ? (distKm.toFixed(1) + 'km') : (Math.round(distKm * 1000) + 'm');
+    var distM = formatDistance(distKm * 1000);
     var inst = routeInstructions[turnI] || routeInstructions[0];
     var street = inst && inst.text ? inst.text : "Mijozga yol";
     var turnType = inst && inst.type != null ? inst.type : -1;
@@ -1215,8 +1227,16 @@ function updateNavUI() {
     if (svg) svg.innerHTML = TSVG[tkey] || TSVG.straight;
     var topDist = document.getElementById('top-dist');
     var topRoad = document.getElementById('top-road');
-    if (topDist) topDist.textContent = distM;
-    if (topRoad) topRoad.textContent = street;
+    if (topDist) {
+        topDist.textContent = distM;
+        topDist.style.fontSize = "1.15rem";
+        topDist.style.fontWeight = "600";
+    }
+    if (topRoad) {
+        topRoad.textContent = street;
+        topRoad.style.fontWeight = "bold";
+        topRoad.style.fontSize = "1.05rem";
+    }
     var avg = Math.max(spd, 8);
     var mins = Math.round((distKm / avg) * 60);
     var eta = new Date();
@@ -1224,7 +1244,7 @@ function updateNavUI() {
     var et = document.getElementById('eta-t');
     var ed = document.getElementById('eta-d');
     if (et) et.textContent = eta.getHours().toString().padStart(2,'0') + ':' + eta.getMinutes().toString().padStart(2,'0');
-    if (ed) ed.textContent = distKm >= 1 ? (distKm.toFixed(1) + 'km') : (Math.round(distKm * 1000) + 'm');
+    if (ed) ed.textContent = formatDistance(distKm * 1000);
 }
 function calcBearing(lat1, lon1, lat2, lon2) {
     var dLon = (lon2 - lon1) * Math.PI / 180;
