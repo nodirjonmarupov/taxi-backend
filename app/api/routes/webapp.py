@@ -227,6 +227,26 @@ async def get_order_for_webapp(
         raise HTTPException(status_code=500, detail=str(e))
 
 
+def _map_osrm_modifier_to_text(mod: str) -> str:
+    if mod in ("fork left", "fork slight left"):
+        return "Chap tomonga ajraling"
+    if mod in ("fork right", "fork slight right"):
+        return "O\u2018ng tomonga ajraling"
+    if mod in ("merge left",):
+        return "Chapga qo\u2018shiling"
+    if mod in ("merge right",):
+        return "O\u2018ngga qo\u2018shiling"
+    if "roundabout" in mod:
+        return "Aylanma harakatdan o\u2018ting"
+    if mod in ("left", "slight left", "sharp left"):
+        return "Chapga buriling"
+    if mod in ("right", "slight right", "sharp right"):
+        return "O'ngga buriling"
+    if mod in ("uturn", "uturn left", "uturn right"):
+        return "Ortga qayting"
+    return "To'g'ri davom eting"
+
+
 @router.get("/order/{order_id}/driving-directions")
 async def driving_directions(
     order_id: int,
@@ -369,6 +389,34 @@ async def driving_directions(
 
     distance_km = float(route.get("distance") or 0) / 1000.0
 
+    steps_out = []
+    for leg in route.get("legs", []) or []:
+        if not isinstance(leg, dict):
+            continue
+        for st in leg.get("steps", []) or []:
+            if not isinstance(st, dict):
+                continue
+            man = st.get("maneuver") or {}
+            if not isinstance(man, dict):
+                continue
+            loc = man.get("location")
+            if not loc or not isinstance(loc, list) or len(loc) < 2:
+                continue
+            try:
+                modifier = (man.get("modifier") or "").lower()
+                text = _map_osrm_modifier_to_text(modifier.replace("_", " "))
+                steps_out.append(
+                    {
+                        "lat": float(loc[1]),
+                        "lng": float(loc[0]),
+                        "text": text,
+                        "modifier": modifier,
+                        "distance": float(st.get("distance") or 0),
+                    }
+                )
+            except (TypeError, ValueError):
+                continue
+
     logger.info("OSRM route OK")
     response = {
         "ok": True,
@@ -376,6 +424,7 @@ async def driving_directions(
         "distance_km": distance_km,
         "snapped_destination": [snapped_dest_lng, snapped_dest_lat],
         "last_meters_to_destination": float(last_meters_to_destination or 0.0),
+        "steps": steps_out,
     }
     if redis:
         try:

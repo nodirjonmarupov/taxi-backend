@@ -1221,8 +1221,19 @@ function updateNavUI() {
     var inst = routeInstructions[turnI] || routeInstructions[0];
     var street = inst && inst.text ? inst.text : "Mijozga yol";
     var turnType = inst && inst.type != null ? inst.type : -1;
-    var tkey = (turnType >= 2 && turnType <= 4) ? 'right' : (turnType >= 6 && turnType <= 8) ? 'left' : (turnType === 0) ? 'straight' : 'straight';
-    if (routeInstructions.length && (turnI >= routeInstructions.length - 1)) tkey = 'arrive';
+    var tkey = 'straight';
+    if (routeInstructions.length && (turnI >= routeInstructions.length - 1)) {
+        tkey = 'arrive';
+    } else if (turnType >= 6 && turnType <= 8 || turnType === -1) {
+        tkey = 'left';
+    } else if (turnType >= 2 && turnType <= 4 || turnType === 1) {
+        if (turnType === 1 && street.indexOf('Chapga') !== -1) tkey = 'left';
+        else if (turnType === 1 && street.indexOf("O'ngga") !== -1) tkey = 'right';
+        else if (turnType === 1) tkey = 'straight';
+        else tkey = 'right';
+    } else if (turnType === 0) {
+        tkey = 'straight';
+    }
     var svg = document.getElementById('turn-svg');
     if (svg) svg.innerHTML = TSVG[tkey] || TSVG.straight;
     var topDist = document.getElementById('top-dist');
@@ -2158,10 +2169,6 @@ function drawRoute(from, to, opts) {
                 return;
             }
             var data = wrapped && wrapped.data;
-            var stripHtml = function(s) {
-                if (!s) return '';
-                return String(s).replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim();
-            };
             if (!wrapped || !wrapped.httpOk || !data || !data.ok || !data.coordinates || !data.coordinates.length) {
                 console.warn('Google route failed → fallback', data && data.error);
                 _clearRouteFetchCache();
@@ -2174,13 +2181,6 @@ function drawRoute(from, to, opts) {
                 : null;
             routeInstructions = [];
             routeCoordinates = [];
-            (data.instructions || []).forEach(function(step, idx) {
-                routeInstructions.push({
-                    text: stripHtml(step.text || ''),
-                    type: (step.type != null && typeof step.type === 'number') ? step.type : -1,
-                    index: step.index != null ? step.index : idx
-                });
-            });
             _driverRouteCoords = data.coordinates.map(function(c) {
                 return [Number(c[0]), Number(c[1])];
             }).filter(function(c) {
@@ -2198,7 +2198,38 @@ function drawRoute(from, to, opts) {
             }
             routeCoordinates = _driverRouteCoords.map(function(c) { return [c[1], c[0]]; }); // [lat,lng]
             resetRouteProgress();
-            routeInstructions = buildPolylineManeuvers(routeCoordinates);
+            if (data.steps && data.steps.length) {
+                routeInstructions = data.steps.map(function(s) {
+                    var idx = 0;
+                    var best = Infinity;
+                    for (var i = 0; i < _driverRouteCoords.length; i++) {
+                        var c = _driverRouteCoords[i];
+                        var d = haversineM(s.lat, s.lng, c[1], c[0]);
+                        if (d < best) {
+                            best = d;
+                            idx = i;
+                        }
+                    }
+                    var type = 0;
+                    var mod = s.modifier || '';
+                    if (mod && mod.includes('left')) type = -1;
+                    else if (mod && mod.includes('right')) type = 1;
+                    else type = 0;
+                    return {
+                        text: s.text,
+                        type: type,
+                        index: idx
+                    };
+                });
+                routeInstructions.push({
+                    text: "🎯 Manzilga yetdingiz",
+                    type: -1,
+                    index: _driverRouteCoords.length - 1
+                });
+            } else {
+                routeInstructions = buildPolylineManeuvers(routeCoordinates);
+            }
+            _currentInstructionIndex = 0;
             if (!routeCoordinates.length || _driverRouteCoords.length < 2) {
                 _clearRouteFetchCache();
                 fallbackStraightLine(fromLat, fromLng, toLat, toLng);
