@@ -54,3 +54,15 @@ def driver_keyboard_online_session(lang: str = "uz") -> ReplyKeyboardMarkup:
         keyboard=[[KeyboardButton(text=get_text(lang, "driver_btn_offline"))]],
         resize_keyboard=True,
     )
+
+
+def driver_keyboard_online_with_taximeter(lang: str = "uz") -> ReplyKeyboardMarkup:
+    """ONLINE: taksometrni ochish (yuqorida), keyin Offline."""
+    t = lambda k: get_text(lang, k)
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text=t("driver_btn_open_taximeter"))],
+            [KeyboardButton(text=t("driver_btn_offline"))],
+        ],
+        resize_keyboard=True,
+    )

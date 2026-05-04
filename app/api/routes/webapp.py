@@ -557,6 +557,30 @@ async def update_order_status(
             r0 = get_redis()
             if r0 is not None:
                 await _ensure_trip_state_for_order_start(r0, order_id, driver_id, db)
+            try:
+                drv_busy = await DriverCRUD.get_by_id(db, driver_id)
+                if drv_busy is not None:
+                    drv_busy.is_available = False
+                    await db.commit()
+            except Exception as ex_unavail:
+                logger.warning(
+                    "driver is_available=False after taximeter start order=%s: %s",
+                    order_id,
+                    ex_unavail,
+                )
+
+        if mapped_status == OrderStatus.COMPLETED and updated_order and driver_id:
+            try:
+                drv_done = await DriverCRUD.get_by_id(db, driver_id)
+                if drv_done is not None:
+                    drv_done.is_available = True
+                    await db.commit()
+            except Exception as ex_avail:
+                logger.warning(
+                    "driver is_available=True after trip complete order=%s: %s",
+                    order_id,
+                    ex_avail,
+                )
 
         if mapped_status in (OrderStatus.COMPLETED, OrderStatus.CANCELLED) and updated_order:
             r1 = get_redis()

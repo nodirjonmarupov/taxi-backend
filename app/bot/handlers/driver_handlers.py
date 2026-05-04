@@ -30,7 +30,7 @@ from app.bot.keyboards.driver_keyboards import (
     DRIVER_GROUP_INVITE_URL,
     driver_keyboard_already_registered,
     driver_keyboard_full,
-    driver_keyboard_online_session,
+    driver_keyboard_online_with_taximeter,
     driver_keyboard_pending_approval,
 )
 from app.bot.messages import (
@@ -939,10 +939,7 @@ async def go_online(message: Message, lang: str = "uz"):
                     "⚡ Shunday qilib buyurtmalar avtomatik keladi!"
                 ),
                 parse_mode="HTML",
-                reply_markup=ReplyKeyboardMarkup(
-                    keyboard=[[KeyboardButton(text="🔴 Offline")]],
-                    resize_keyboard=True,
-                ),
+                reply_markup=driver_keyboard_online_with_taximeter(lang),
             )
             
     except Exception as e:
@@ -1034,6 +1031,10 @@ async def open_taximeter_manual(message: Message):
                         await _ensure_trip_state_for_order_start(
                             r_ongoing, ongoing.id, driver.id, db
                         )
+                    drv_sync = await DriverCRUD.get_by_id(db, driver.id)
+                    if drv_sync and cur_l == "in_progress":
+                        drv_sync.is_available = False
+                        await db.commit()
                     kb = driver_taximeter_reply_markup(
                         driver_ui_lang, ongoing.id, driver.id, with_chat=(cur_l == "accepted")
                     )
@@ -1105,6 +1106,11 @@ async def open_taximeter_manual(message: Message):
             r = get_redis()
             if r:
                 await _ensure_trip_state_for_order_start(r, new_order.id, driver.id, db)
+
+            drv_manual = await DriverCRUD.get_by_id(db, driver.id)
+            if drv_manual:
+                drv_manual.is_available = False
+                await db.commit()
 
             kb = driver_taximeter_reply_markup(
                 driver_ui_lang, new_order.id, driver.id, with_chat=False
