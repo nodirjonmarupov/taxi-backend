@@ -98,6 +98,7 @@ let _lastProgressLng = null;
 let _lastProgressAnchorIdx = null;
 let _lastDbgLat = null;
 let _lastDbgLng = null;
+let _lastRouteSnapUpdate2 = 0;
 let _dispLat = null;
 let _dispLng = null;
 let _dispArrowDeg = null;
@@ -1075,57 +1076,58 @@ function renderLoop() {
         }
 
         if (_driverRouteLine && _driverRouteCoords && _driverRouteCoords.length > 1 && typeof turf !== 'undefined') {
-            var rawLat = dLat;
-            var rawLng = dLng;
+            if (_nowMs - _lastRouteSnapUpdate2 > 100) {
+                _lastRouteSnapUpdate2 = _nowMs;
+                var rawLat = dLat;
+                var rawLng = dLng;
 
-            var distM = 0;
+                var distM = 0;
 
-            try {
-                var pt = turf.point([rawLng, rawLat]);
-                var snap = turf.nearestPointOnLine(_driverRouteLine, pt, { units: 'kilometers' });
+                try {
+                    var pt = turf.point([rawLng, rawLat]);
+                    var snap = turf.nearestPointOnLine(_driverRouteLine, pt, { units: 'kilometers' });
 
-                if (snap && snap.geometry && snap.geometry.coordinates) {
-                    if (snap.properties && typeof snap.properties.dist === 'number') {
-                        distM = snap.properties.dist * 1000;
-                    } else {
-                        distM = 9999; // force RAW GPS fallback
-                    }
+                    if (snap && snap.geometry && snap.geometry.coordinates) {
+                        if (snap.properties && typeof snap.properties.dist === 'number') {
+                            distM = snap.properties.dist * 1000;
+                        } else {
+                            distM = 9999; // force RAW GPS fallback
+                        }
 
-                    // Snap hysteresis: avoid snap/raw flapping near threshold.
-                    if (!isSnapped && distM < 20) {
-                        isSnapped = true;
-                    }
-                    if (isSnapped && distM > 30) {
-                        isSnapped = false;
-                    }
+                        // Snap hysteresis: avoid snap/raw flapping near threshold.
+                        if (!isSnapped && distM < 20) {
+                            isSnapped = true;
+                        }
+                        if (isSnapped && distM > 30) {
+                            isSnapped = false;
+                        }
 
-                    if (isSnapped) {
-                        dLng = snap.geometry.coordinates[0];
-                        dLat = snap.geometry.coordinates[1];
+                        if (isSnapped) {
+                            dLng = snap.geometry.coordinates[0];
+                            dLat = snap.geometry.coordinates[1];
 
-                        if (snap.properties && snap.properties.index != null) {
-                            var maxIdx = _driverRouteCoords.length > 1 ? _driverRouteCoords.length - 2 : 0;
-                            var newIdx = Math.min(snap.properties.index, maxIdx);
+                            if (snap.properties && snap.properties.index != null) {
+                                var maxIdx = _driverRouteCoords.length > 1 ? _driverRouteCoords.length - 2 : 0;
+                                var newIdx = Math.min(snap.properties.index, maxIdx);
 
-                            if (typeof _routeAnchorIdx !== 'number' || isNaN(_routeAnchorIdx)) {
-                                _routeAnchorIdx = newIdx;
-                            } else {
-                                var diff = newIdx - _routeAnchorIdx;
-
-                                if (diff >= 0 && diff <= 3) {
+                                if (typeof _routeAnchorIdx !== 'number' || isNaN(_routeAnchorIdx)) {
                                     _routeAnchorIdx = newIdx;
-                                } else if (diff < 0 && Math.abs(diff) > 5) {
-                                    _routeAnchorIdx = newIdx;
+                                } else {
+                                    var diff = newIdx - _routeAnchorIdx;
+
+                                    if (diff >= 0 && diff <= 3) {
+                                        _routeAnchorIdx = newIdx;
+                                    }
                                 }
                             }
+                        } else {
+                            // use RAW GPS if far
+                            dLng = rawLng;
+                            dLat = rawLat;
                         }
-                    } else {
-                        // use RAW GPS if far
-                        dLng = rawLng;
-                        dLat = rawLat;
                     }
-                }
-            } catch (_) {}
+                } catch (_) {}
+            }
         }
 
 
@@ -1255,7 +1257,9 @@ function renderLoop() {
                 if (Date.now() >= _camBlockUntil) {
                     var currentHeading = displayHeading;
                     if (!_userInteracting) {
-                        updateCamera(dLat, dLng, currentHeading);
+                        var _camFeedLat = (_dispLat !== null) ? _dispLat : dLat;
+                        var _camFeedLng = (_dispLng !== null) ? _dispLng : dLng;
+                        updateCamera(_camFeedLat, _camFeedLng, currentHeading);
                     }
                     _lastCamBrg = currentHeading;
 
