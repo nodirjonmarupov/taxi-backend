@@ -94,7 +94,7 @@ async def _notify_customer_driver_assigned(
     driver,
     driver_user,
 ) -> None:
-    """Haydovchi biriktirilgach mijozga xabar + tracking (callback accept_order bilan bir xil yo'l)."""
+    """Haydovchi biriktirilgach mijozga xabar (xarita/kuzatish tugmasisiz)."""
     if order_skip_customer_notifications(order):
         return
     order_user = await UserCRUD.get_by_id(db, order.user_id)
@@ -104,25 +104,6 @@ async def _notify_customer_driver_assigned(
         return
     try:
         user_lang = normalize_bot_lang(getattr(order_user, "language_code", None) or "uz")
-        base_url = getattr(settings, "WEBAPP_BASE_URL", "https://candid-semiexposed-dung.ngrok-free.dev")
-        ts = int(time.time())
-        tracking_url = f"{base_url}/tracking?order_id={order.id}&t={ts}"
-        tracking_kb = InlineKeyboardMarkup(
-            inline_keyboard=[
-                [
-                    InlineKeyboardButton(
-                        text=get_text(user_lang, "track_driver"),
-                        web_app=WebAppInfo(url=tracking_url),
-                    )
-                ],
-                [
-                    InlineKeyboardButton(
-                        text=get_text(user_lang, "user_btn_write_driver"),
-                        callback_data="user_chat_tip",
-                    )
-                ],
-            ]
-        )
         driver_msg = (
             f"{get_text(user_lang, 'driver_found_title')}\n\n"
             f"👨‍✈️ {driver_user.first_name}\n"
@@ -132,15 +113,12 @@ async def _notify_customer_driver_assigned(
             f"{get_text(user_lang, 'taxi_arriving')}\n"
             f"{get_text(user_lang, 'chat_via_bot')}"
         )
-        sent_msg = await bot.send_message(
+        await bot.send_message(
             chat_id=order_user.telegram_id,
             text=driver_msg,
-            reply_markup=tracking_kb,
             parse_mode="HTML",
         )
-        order.user_tracking_message_id = sent_msg.message_id
-        await db.commit()
-        logger.info("✅ Mijozga xabar yuborildi (tracking mid=%s)", sent_msg.message_id)
+        logger.info("✅ Mijozga xabar yuborildi (order=%s)", order.id)
     except Exception as e:
         logger.error(f"❌ Mijozga xabar yuborishda xato: {e}")
 

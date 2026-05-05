@@ -303,64 +303,98 @@ async def driving_directions(
                 pass
         return {"ok": False, "error": "rate_limited"}
 
-    # Snap destination to nearest drivable point (OSRM /nearest) for routing only.
-    # IMPORTANT: Do not change original destination used by the UI pin.
+    import math as _math
+    _SNAP_MAX_M = 100.0  # reject snap if it moved the point more than this
+
+    def _haversine_m(lat1: float, lng1: float, lat2: float, lng2: float) -> float:
+        R = 6_371_000.0
+        dlat = _math.radians(lat2 - lat1)
+        dlng = _math.radians(lng2 - lng1)
+        a = (
+            _math.sin(dlat / 2) ** 2
+            + _math.cos(_math.radians(lat1)) * _math.cos(_math.radians(lat2))
+            * _math.sin(dlng / 2) ** 2
+        )
+        return 2 * R * _math.atan2(_math.sqrt(a), _math.sqrt(1 - a))
+
+    def _extract_snap(resp_json, orig_lat: float, orig_lng: float):
+        """Return (snapped_lng, snapped_lat) from OSRM /nearest response.
+        Uses number=3 candidates and picks the closest one within _SNAP_MAX_M.
+        Falls back to original coords on any error or if all candidates are too far."""
+        try:
+            wps = resp_json.get("waypoints") if isinstance(resp_json, dict) else None
+            if not wps or not isinstance(wps, list):
+                return orig_lng, orig_lat
+            best_lng, best_lat, best_dist = orig_lng, orig_lat, _SNAP_MAX_M
+            for wp in wps:
+                if not isinstance(wp, dict):
+                    continue
+                loc = wp.get("location")
+                if not loc or not isinstance(loc, list) or len(loc) < 2:
+                    continue
+                clng, clat = float(loc[0]), float(loc[1])
+                d = _haversine_m(orig_lat, orig_lng, clat, clng)
+                if d < best_dist:
+                    best_dist = d
+                    best_lng, best_lat = clng, clat
+            return best_lng, best_lat
+        except Exception:
+            return orig_lng, orig_lat
+
+    # Snap origin and destination to nearest drivable road point in parallel.
+    # IMPORTANT: snapped coords are used only for routing; UI pins use the originals.
+    snapped_orig_lng = float(origin_lng)
+    snapped_orig_lat = float(origin_lat)
     snapped_dest_lng = float(dest_lng)
     snapped_dest_lat = float(dest_lat)
     last_meters_to_destination = 0.0
-    nearest_url = (
+
+    nearest_orig_url = (
+        "https://router.project-osrm.org/nearest/v1/driving/"
+        f"{float(origin_lng)},{float(origin_lat)}"
+        "?number=3"
+    )
+    nearest_dest_url = (
         "https://router.project-osrm.org/nearest/v1/driving/"
         f"{float(dest_lng)},{float(dest_lat)}"
-        "?number=1"
+        "?number=3"
     )
 
-    # OSRM: lon,lat order in path (GeoJSON coordinates are [lng, lat])
-    osrm_url = (
-        "https://router.project-osrm.org/route/v1/driving/"
-        f"{float(origin_lng)},{float(origin_lat)};{snapped_dest_lng},{snapped_dest_lat}"
-        "?overview=full&geometries=geojson&steps=true&annotations=true"
-    )
     try:
         async with httpx.AsyncClient(timeout=12.0) as client:
-            # /nearest for destination snap (best-effort; ignore failures)
+            # Snap origin + destination in parallel (best-effort; failures fall back to raw coords)
             try:
-                n_resp = await client.get(nearest_url)
-                if n_resp.status_code == 200:
-                    n_data = n_resp.json()
-                    wps = n_data.get("waypoints") if isinstance(n_data, dict) else None
-                    if wps and isinstance(wps, list) and len(wps) > 0:
-                        loc = (wps[0] or {}).get("location") if isinstance(wps[0], dict) else None
-                        if loc and isinstance(loc, list) and len(loc) >= 2:
-                            snapped_dest_lng = float(loc[0])
-                            snapped_dest_lat = float(loc[1])
+                import asyncio as _asyncio
+                n_orig_resp, n_dest_resp = await _asyncio.gather(
+                    client.get(nearest_orig_url),
+                    client.get(nearest_dest_url),
+                    return_exceptions=True,
+                )
+                if not isinstance(n_orig_resp, Exception) and n_orig_resp.status_code == 200:
+                    snapped_orig_lng, snapped_orig_lat = _extract_snap(
+                        n_orig_resp.json(), float(origin_lat), float(origin_lng)
+                    )
+                if not isinstance(n_dest_resp, Exception) and n_dest_resp.status_code == 200:
+                    snapped_dest_lng, snapped_dest_lat = _extract_snap(
+                        n_dest_resp.json(), float(dest_lat), float(dest_lng)
+                    )
             except Exception:
                 pass
 
-            # Haversine distance from real destination to snapped road point
+            # Distance from UI destination pin to snapped road point (used by frontend)
             try:
-                import math
-                R = 6371000.0
-                lat1 = float(dest_lat)
-                lng1 = float(dest_lng)
-                lat2 = float(snapped_dest_lat)
-                lng2 = float(snapped_dest_lng)
-                dlat = math.radians(lat2 - lat1)
-                dlng = math.radians(lng2 - lng1)
-                a = (
-                    math.sin(dlat / 2) ** 2
-                    + math.cos(math.radians(lat1))
-                    * math.cos(math.radians(lat2))
-                    * math.sin(dlng / 2) ** 2
+                last_meters_to_destination = _haversine_m(
+                    float(dest_lat), float(dest_lng),
+                    snapped_dest_lat, snapped_dest_lng,
                 )
-                last_meters_to_destination = 2 * R * math.atan2(math.sqrt(a), math.sqrt(1 - a))
             except Exception:
                 last_meters_to_destination = 0.0
 
-            # Build route URL using snapped destination (if found)
+            # Build route URL with snapped endpoints
             osrm_url = (
                 "https://router.project-osrm.org/route/v1/driving/"
-                f"{float(origin_lng)},{float(origin_lat)};{snapped_dest_lng},{snapped_dest_lat}"
-                "?overview=full&geometries=geojson&steps=true&annotations=true"
+                f"{snapped_orig_lng},{snapped_orig_lat};{snapped_dest_lng},{snapped_dest_lat}"
+                "?overview=full&geometries=geojson&steps=true&continue_straight=true"
             )
             resp = await client.get(osrm_url)
             data = resp.json()
