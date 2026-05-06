@@ -1116,7 +1116,7 @@ function renderLoop() {
                                 } else {
                                     var diff = newIdx - _routeAnchorIdx;
 
-                                    if (diff >= 0 && diff <= 3) {
+                                    if (diff >= 0 && diff <= 15) { // FIXED: BUG#5
                                         _routeAnchorIdx = newIdx;
                                     }
                                 }
@@ -1845,10 +1845,18 @@ function startDriverTracking() {
                     intervals.position = setInterval(tryTgLocation, 2000);
                     return;
                 }
+                if (intervals.position != null) { // FIXED: BUG#6
+                    clearInterval(intervals.position);
+                    intervals.position = null;
+                }
                 _startBrowserGPS(opts);
             });
             return;
         } catch (e) {
+            if (intervals.position != null) { // FIXED: BUG#6
+                clearInterval(intervals.position);
+                intervals.position = null;
+            }
             _startBrowserGPS(opts);
         }
     }
@@ -2437,13 +2445,6 @@ function fallbackStraightLine(fromLat, fromLng, toLat, toLng) {
 }
 
 /** Reroute-only: 4s cooldown between allowed Google Directions calls (cost control). */
-var ROUTE_REROUTE_COOLDOWN_MS = 4000;
-function shouldReroute() {
-    var now = Date.now();
-    if (now - _lastRerouteTime < ROUTE_REROUTE_COOLDOWN_MS) return false;
-    _lastRerouteTime = now;
-    return true;
-}
 
 /**
  * Off-route detection: called after every GPS update during a trip.
@@ -2451,33 +2452,15 @@ function shouldReroute() {
  * Requires consecutive samples >= OFF_ROUTE_THRESHOLD_M before tryReroute (reduces GPS spike false positives).
  * tryReroute applies cooldown, in-flight guard, then drawRoute.
  */
-async function tryReroute(lat, lng, opts = {}) {
-    if (Date.now() - __lastRerouteTs < 5000) {
-        return false;
-    }
+async function tryReroute(lat, lng, opts = {}) { // FIXED: BUG#2
+    const _now = Date.now();
     if (_rerouteInFlight && !opts?.force) return false;
-    if (!opts.force && !shouldReroute()) return false;
-    // dynamic threshold based on speed
-    var speed = (typeof spd === "number") ? spd : 0;
-    var thr = speed < 10 ? 120 : 80;
-
-    // distance from last reroute
-    var moved = (_lastRerouteLat != null && _lastRerouteLng != null)
-        ? haversineM(lat, lng, _lastRerouteLat, _lastRerouteLng)
-        : 999999;
-
-    // distance from route (same metric as checkOffRoute)
-    var offRouteDist = (typeof turf !== 'undefined' && _driverRouteLine)
-        ? turf.pointToLineDistance(turf.point([lng, lat]), _driverRouteLine, { units: 'meters' })
-        : 999999;
-
-    if (Date.now() - __lastRerouteTs < 20000) {
-        // block only if small movement AND still near route
-        if (moved < thr && offRouteDist < OFF_ROUTE_THRESHOLD_M) {
-            return false;
-        }
+    if (!opts?.force && (_now - __lastRerouteTs < 12000)) return false;
+    if (ORDER_DATA?.destination_latitude != null) {
+        const _distToDest = haversineM(lat, lng, ORDER_DATA.destination_latitude, ORDER_DATA.destination_longitude);
+        if (_distToDest < 150) return false;
     }
-
+    // FIXED: dead code from BUG#2 cleanup
     // update reroute tracking
     __lastRerouteTs = Date.now();
     _lastRerouteLat = lat;
@@ -2535,10 +2518,9 @@ function checkOffRoute(lat, lng, speed) {
         } else {
             _offRouteCount = 0;
         }
-        if (_offRouteCount >= 1) {
-            tryReroute(lat, lng).then(function(triggered) {
-                if (triggered) { _offRouteCount = 0; }
-            });
+        if (_offRouteCount >= 3) { // FIXED: BUG#1
+            _offRouteCount = 0;
+            tryReroute(lat, lng);
         }
     } catch (_) {}
 }
