@@ -2328,7 +2328,7 @@ function drawRoute(from, to, opts) {
                 try {
                     var _lastPt = _driverRouteCoords[_driverRouteCoords.length - 1];
                     var _gapM = haversineM(_lastPt[1], _lastPt[0], toLat, toLng); // lat=index1, lon=index0
-                    if (_gapM > 25 && _gapM < 150) {
+                    if (_gapM > 15 && _gapM < 40) {
                         _driverRouteCoords.push([toLng, toLat]); // push as [lon, lat]
                     }
                 } catch (e) {}
