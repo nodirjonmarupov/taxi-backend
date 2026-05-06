@@ -1103,8 +1103,8 @@ function renderLoop() {
                         }
 
                         if (isSnapped) {
-                            dLng = snap.geometry.coordinates[0];
-                            dLat = snap.geometry.coordinates[1];
+                            dLat += (snap.geometry.coordinates[1] - dLat) * 0.5;
+                            dLng += (snap.geometry.coordinates[0] - dLng) * 0.5;
 
                             if (snap.properties && snap.properties.index != null) {
                                 var maxIdx = _driverRouteCoords.length > 1 ? _driverRouteCoords.length - 2 : 0;
