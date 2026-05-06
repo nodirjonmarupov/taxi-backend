@@ -51,6 +51,7 @@ let _camLng = null;
 let _lastCamUpdate = 0;
 let _userZooming = false;
 let _userInteracting = false;
+let _isRotating = false;
 let _lastUserInteraction = 0;
 let _velLat = 0, _velLng = 0;
 let _smoothVelLat = 0, _smoothVelLng = 0;
@@ -669,7 +670,8 @@ function initGoogleMap(initialLat, initialLng) {
         renderingType: google.maps.RenderingType.VECTOR,
         tilt: 45,
         heading: 0,
-        isFractionalZoomEnabled: true
+        isFractionalZoomEnabled: true,
+        headingInteractionEnabled: true
     });
     if (!_zoomInitialized) {
         try { map.setZoom(17); } catch (_) {}
@@ -688,6 +690,12 @@ function initGoogleMap(initialLat, initialLng) {
     });
     map.addListener('dragstart', function () {
         _userInteracting = true;
+        _lastUserInteraction = Date.now();
+    });
+    map.addListener('heading_changed', function () {
+        if (_userInteracting) {   // only user gesture, not programmatic
+            _isRotating = true;
+        }
         _lastUserInteraction = Date.now();
     });
     // Attempt to hide POIs/transit. In VECTOR mode this may be ignored (acceptable).
@@ -763,7 +771,9 @@ function updateCamera(lat, lng, heading) {
 
     map.setCenter({ lat: camLat, lng: camLng });
 
-    try { map.setHeading(heading); } catch (e) { console.warn('map.setHeading failed', e); }
+    if (!_isRotating && !_userInteracting) {
+        try { map.setHeading(heading); } catch (e) { console.warn('map.setHeading failed', e); }
+    }
     try { map.setTilt(45); } catch (e) { console.warn('map.setTilt failed', e); }
 }
 /** Backend / _driverRouteCoords: [[lng, lat], ...] -> path for google.maps.Polyline */
@@ -1283,8 +1293,9 @@ function renderLoop() {
         }
 
         if (_userInteracting) {
-            if (Date.now() - _lastUserInteraction > 3000) {
+            if (Date.now() - _lastUserInteraction > 2500) {
                 _userInteracting = false;
+                _isRotating = false;
             }
         }
 
