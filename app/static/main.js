@@ -100,6 +100,7 @@ let _lastDbgLat = null;
 let _lastDbgLng = null;
 let _lastRouteSnapUpdate2 = 0;
 let _dispLat = null;
+let _lastRenderLat = null, _lastRenderLng = null;
 let _dispLng = null;
 let _dispArrowDeg = null;
 let _wakeLock = null;
@@ -1219,7 +1220,31 @@ function renderLoop() {
             } catch (e) {}
         }
 
-            driverMarker.setLngLat([_dispLng, _dispLat]);
+            // UI jitter filter (meter-based, Google Maps safe)
+            var _renderLat = _dispLat;
+            var _renderLng = _dispLng;
+
+            if (_lastRenderLat != null && _lastRenderLng != null) {
+                var _zoom = map && map.getZoom ? map.getZoom() : 17;
+
+                // meters per pixel (approx)
+                var _mpp = (156543.03 * Math.cos(_dispLat * Math.PI / 180)) / Math.pow(2, _zoom);
+
+                // 3px equivalent in meters
+                var _threshM = _mpp * 3;
+
+                var _moveM = haversineM(_dispLat, _dispLng, _lastRenderLat, _lastRenderLng);
+
+                if (_moveM < _threshM) {
+                    _renderLat = _lastRenderLat;
+                    _renderLng = _lastRenderLng;
+                }
+            }
+
+            _lastRenderLat = _renderLat;
+            _lastRenderLng = _renderLng;
+
+            driverMarker.setLngLat([_renderLng, _renderLat]);
 
             var _targetDeg = (displayHeading - _displayArrowBrg + 720) % 360;
             if (_dispArrowDeg === null) {
