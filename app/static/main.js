@@ -1130,7 +1130,6 @@ function renderLoop() {
             }
         }
 
-
         // updateBearing ?????????????????????????????????????????????????????????
         // Route-based heading (segment bearing); GPS/lastHeading only as fallback.
         var _routeBearingApplied = false;
@@ -1190,6 +1189,36 @@ function renderLoop() {
             }
             _dispLat += (dLat - _dispLat) * 0.2;
             _dispLng += (dLng - _dispLng) * 0.2;
+
+        /* Arrival magnetism: smoothly pull rendered position to destination in final 40m.
+           Visual-only: does NOT modify dLat/dLng or routing logic. */
+        if ((appState === 'arriving' || appState === 'ready') &&
+            typeof ORDER_DATA !== 'undefined' &&
+            ORDER_DATA &&
+            ORDER_DATA.destination_latitude != null &&
+            ORDER_DATA.destination_longitude != null &&
+            _dispLat !== null && _dispLng !== null &&
+            dLat !== null && dLng !== null) {
+            try {
+                var _arrDstLat = ORDER_DATA.destination_latitude;
+                var _arrDstLng = ORDER_DATA.destination_longitude;
+
+                // distance based on logic position (dLat/dLng), not display
+                var _arrDist = haversineM(dLat, dLng, _arrDstLat, _arrDstLng);
+
+                if (_arrDist < 40 && _arrDist > 0) {
+                    // blend factor: 0 at 40m to 1 at 0m
+                    var _arrBlend = (40 - _arrDist) / 40;
+
+                    // gentle pull (no teleport)
+                    var _alpha = _arrBlend * 0.25; // max 0.25 per tick
+
+                    _dispLat += (_arrDstLat - _dispLat) * _alpha;
+                    _dispLng += (_arrDstLng - _dispLng) * _alpha;
+                }
+            } catch (e) {}
+        }
+
             driverMarker.setLngLat([_dispLng, _dispLat]);
 
             var _targetDeg = (displayHeading - _displayArrowBrg + 720) % 360;
@@ -2249,6 +2278,17 @@ function drawRoute(from, to, opts) {
             }).filter(function(c) {
                 return !isNaN(c[0]) && !isNaN(c[1]) && isValidCoord(c[1], c[0]);
             });
+            // Close-the-gap: visually connect route to destination if OSRM ended early.
+            // _driverRouteCoords is [lon, lat] order; toLat/toLng are in scope from drawRoute().
+            if (_driverRouteCoords.length > 1 && toLat != null && toLng != null && isValidCoord(toLat, toLng)) {
+                try {
+                    var _lastPt = _driverRouteCoords[_driverRouteCoords.length - 1];
+                    var _gapM = haversineM(_lastPt[1], _lastPt[0], toLat, toLng); // lat=index1, lon=index0
+                    if (_gapM > 25 && _gapM < 150) {
+                        _driverRouteCoords.push([toLng, toLat]); // push as [lon, lat]
+                    }
+                } catch (e) {}
+            }
             var len = _driverRouteCoords.length;
             var midIdx = Math.floor(len / 2);
             var newHash = len + ':' +
