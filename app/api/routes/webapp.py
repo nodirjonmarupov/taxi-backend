@@ -2,6 +2,7 @@
 WebApp API routes
 """
 import json
+import os
 import time
 import httpx
 from pathlib import Path
@@ -349,13 +350,16 @@ async def driving_directions(
     snapped_dest_lat = float(dest_lat)
     last_meters_to_destination = 0.0
 
+    OSRM_BASE_URL = os.getenv("OSRM_BASE_URL", "https://router.project-osrm.org")
+    ENABLE_OSRM_MATCH = os.getenv("ENABLE_OSRM_MATCH", "false").lower() == "true"
+
     nearest_orig_url = (
-        "https://router.project-osrm.org/nearest/v1/driving/"
+        f"{OSRM_BASE_URL}/nearest/v1/driving/"
         f"{float(origin_lng)},{float(origin_lat)}"
         "?number=3"
     )
     nearest_dest_url = (
-        "https://router.project-osrm.org/nearest/v1/driving/"
+        f"{OSRM_BASE_URL}/nearest/v1/driving/"
         f"{float(dest_lng)},{float(dest_lat)}"
         "?number=3"
     )
@@ -392,7 +396,7 @@ async def driving_directions(
 
             # Build route URL with snapped endpoints
             osrm_url = (
-                "https://router.project-osrm.org/route/v1/driving/"
+                f"{OSRM_BASE_URL}/route/v1/driving/"
                 f"{snapped_orig_lng},{snapped_orig_lat};{snapped_dest_lng},{snapped_dest_lat}"
                 "?overview=full&geometries=geojson&steps=true&continue_straight=true"
             )
@@ -466,6 +470,67 @@ async def driving_directions(
         except Exception:
             pass
     return response
+
+class MapMatchRequest(BaseModel):
+    coordinates: list
+    timestamps: list
+    radiuses: list
+
+@router.post("/order/{order_id}/map-match")
+async def map_match(
+    order_id: int,
+    body: MapMatchRequest,
+    token: str = Header(None, alias="X-WebApp-Token"),
+    qtoken: str = Query(None, alias="token"),
+    db: AsyncSession = Depends(get_db)
+):
+    # Feature flag
+    if not os.getenv("ENABLE_OSRM_MATCH", "false").lower() == "true":
+        return {"matched": None, "reason": "disabled"}
+
+    # Auth guard — copied verbatim from driving-directions
+    t = token or qtoken
+    if not t:
+        raise HTTPException(status_code=403, detail="WebApp token required")
+    data_tok = verify_webapp_token(t, order_id)
+    if not data_tok:
+        raise HTTPException(status_code=403, detail="Invalid or expired WebApp token")
+    _, driver_id = data_tok
+    order = await OrderCRUD.get_by_id(db, order_id)
+    if not order:
+        raise HTTPException(status_code=404, detail="Order not found")
+    if getattr(order, "driver_id", None) != driver_id:
+        raise HTTPException(status_code=403, detail="Access denied: not your order")
+
+    # Validate input
+    coords = body.coordinates
+    if not (3 <= len(coords) <= 7):
+        return {"matched": None, "reason": "invalid_input"}
+    if len(body.timestamps) != len(coords) or len(body.radiuses) != len(coords):
+        return {"matched": None, "reason": "invalid_input"}
+
+    try:
+        _osrm_base = os.getenv("OSRM_BASE_URL", "https://router.project-osrm.org")
+        coords_str = ";".join(f"{c[0]},{c[1]}" for c in coords)
+        radii_str  = ";".join(str(r) for r in body.radiuses)
+        ts_str     = ";".join(str(t) for t in body.timestamps)
+        url = (
+            f"{_osrm_base}/match/v1/driving/{coords_str}"
+            f"?overview=false&geometries=geojson"
+            f"&radiuses={radii_str}&timestamps={ts_str}"
+        )
+        async with httpx.AsyncClient(timeout=4.0) as client:
+            resp = await client.get(url)
+            data = resp.json()
+
+        if data.get("code") != "Ok" or not data.get("matchings"):
+            return {"matched": None, "reason": "no_match"}
+
+        last = data["matchings"][0]["geometry"]["coordinates"][-1]
+        return {"matched": {"lat": last[1], "lng": last[0]}}
+
+    except Exception:
+        return {"matched": None, "reason": "error"}
 
 
 def _validate_status_transition(current: str, new_status: str, mapped: Any) -> None:

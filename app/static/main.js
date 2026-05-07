@@ -87,6 +87,11 @@ function canForceRerouteNow() {
 }
 
 let _rerouteInFlight = false; // single in-flight directions request for reroute
+// /match pipeline
+let _matchInFlight = false;
+let _matchCallCount = 0;
+const _GPS_BUFFER_SIZE = 6;
+const _gpsMatchBuffer = [];
 let _routeInFlight = false;   // global mutex: any drawRoute directions fetch
 /** Last successful road route (avoid duplicate Directions calls for tiny GPS jitter). */
 let _routeFetchCache = null;
@@ -1979,6 +1984,66 @@ function setTurnAndDistFromDriver(driverPos) {
     var t = toLatLng(turnCoord);
     distKm = turnCoord ? haversineM(driverPos.lat, driverPos.lng, t.lat, t.lng) / 1000 : 0;
 }
+function _pushGpsBuffer(lat, lng) {
+    _gpsMatchBuffer.push({ lat, lng, ts: Math.floor(Date.now() / 1000) });
+    if (_gpsMatchBuffer.length > _GPS_BUFFER_SIZE) _gpsMatchBuffer.shift();
+}
+
+async function _fetchMapMatch() {
+    if (_matchInFlight) return;
+    if (_gpsMatchBuffer.length < 3) return;
+    if (!ORDER_DATA?.id) return;
+
+    _matchInFlight = true;
+
+    // Safe abort pattern — AbortSignal.timeout() not supported in Telegram WebView
+    var _matchController = new AbortController();
+    var _matchTimeout = setTimeout(function() {
+        _matchController.abort();
+    }, 4000);
+
+    try {
+        const payload = {
+            coordinates: _gpsMatchBuffer.map(function(p) { return [p.lng, p.lat]; }),
+            timestamps:  _gpsMatchBuffer.map(function(p) { return p.ts; }),
+            radiuses:    _gpsMatchBuffer.map(function()  { return 35; })
+        };
+
+        const res = await fetch(
+            API_BASE_URL + '/api/webapp/order/' + ORDER_DATA.id + '/map-match',
+            {
+                method: 'POST',
+                headers: Object.assign({}, webappHeaders(), { 'Content-Type': 'application/json' }),
+                body: JSON.stringify(payload),
+                signal: _matchController.signal
+            }
+        );
+
+        clearTimeout(_matchTimeout);
+
+        if (!res.ok) return;
+        const data = await res.json();
+
+        if (
+            data && data.matched &&
+            data.matched.lat != null &&
+            data.matched.lng != null &&
+            tLat !== null && tLng !== null
+        ) {
+            // Soft EMA injection into global tLat/tLng
+            // renderLoop reads these next frame — pipeline continues unchanged
+            tLat = tLat + 0.35 * (data.matched.lat - tLat);
+            tLng = tLng + 0.35 * (data.matched.lng - tLng);
+        }
+
+    } catch (e) {
+        clearTimeout(_matchTimeout);
+        // silent fallback — existing EMA pipeline continues unchanged
+    } finally {
+        _matchInFlight = false;
+    }
+}
+
 function updateDriverMarker(lat, lng, heading) {
     try {
         if (!map || !ORDER_DATA) return;
@@ -2018,6 +2083,12 @@ function updateDriverMarker(lat, lng, heading) {
         pLng = lng;
         tLat = sl;
         tLng = sa;
+        // /match pipeline
+        _pushGpsBuffer(lat, lng);
+        _matchCallCount++;
+        if (_matchCallCount % 3 === 0) {
+            _fetchMapMatch(); // fire-and-forget, intentionally not awaited
+        }
         spd = speedKmh;
         // Velocity estimation with EMA smoothing at GPS rate.
         // Raw velocity = ?snapped / ?t_gps. One noisy GPS fix can spike 짹27 km/h
