@@ -1281,30 +1281,62 @@ async def live_location_update(message: Message):
 
 @driver_router.message(F.text.in_(DRIVER_BALANCE_TEXTS))
 async def show_balance(message: Message, lang: str = "uz"):
-    """Balans"""
+    """Balans va kunlik statistika"""
     try:
         async with AsyncSessionLocal() as db:
             lang = await db_lang_for_telegram(db, message.from_user.id)
             user = await UserCRUD.get_by_telegram_id(db, message.from_user.id)
             if not user:
                 return
-            
             driver = await DriverCRUD.get_by_user_id(db, user.id)
             if not driver:
                 return
-            
-            await message.answer(
-                get_text(
-                    lang,
-                    "driver_balance_body",
-                    amount=f"{driver.total_earnings or 0:.0f}",
-                    trips=driver.total_trips or 0,
-                ),
-                parse_mode="HTML"
+
+            # Tashkent "bugun" — UTC+5
+            from datetime import datetime, timedelta
+            now_utc = datetime.utcnow()
+            now_tashkent = now_utc + timedelta(hours=5)
+            today_tashkent_start = now_tashkent.replace(
+                hour=0, minute=0, second=0, microsecond=0
             )
-            
+            today_utc_start = today_tashkent_start - timedelta(hours=5)
+
+            # Bugungi yakunlangan safarlar
+            from sqlalchemy import select, func
+            from app.models.order import Order
+
+            result = await db.execute(
+                select(
+                    func.count(Order.id).label("trips_today"),
+                    func.coalesce(func.sum(Order.final_price), 0).label("earnings_today")
+                ).where(
+                    Order.driver_id == driver.id,
+                    Order.status == "completed",
+                    Order.completed_at >= today_utc_start
+                )
+            )
+            row = result.one()
+            trips_today = int(row.trips_today or 0)
+            earnings_today = float(row.earnings_today or 0)
+
+            total_earnings = float(driver.total_earnings or 0)
+            balance = float(driver.balance or 0)
+
+            text = (
+                f"💰 <b>BALANS</b>\n\n"
+                f"💵 Mavjud balans: <b>{balance:,.0f} so'm</b>\n"
+                f"📊 Jami daromad: <b>{total_earnings:,.0f} so'm</b>\n\n"
+                f"━━━━━━━━━━━━━━━\n"
+                f"📅 <b>Bugun</b>\n"
+                f"🚕 Safarlar: <b>{trips_today} ta</b>\n"
+                f"💵 Daromad: <b>{earnings_today:,.0f} so'm</b>"
+            )
+
+            await message.answer(text, parse_mode="HTML")
+
     except Exception as e:
         logger.error(f"❌ Balans ko'rsatishda xato: {e}")
+        await message.answer("❌ Xatolik yuz berdi. Qayta urinib ko'ring.")
 
 
 # ============================================
