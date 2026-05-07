@@ -39,7 +39,7 @@ services:
       - osrm_data:/data
     command: osrm-routed --algorithm mld /data/uzbekistan-latest.osrm
     healthcheck:
-      test: ["CMD-SHELL", "curl -sf http://localhost:5000/route/v1/driving/69.24,41.29;69.34,41.39?overview=false | grep -q 'Ok' || exit 1"]
+      test: ["CMD-SHELL", "wget -qO- 'http://localhost:5000/route/v1/driving/69.24,41.29;69.34,41.39?overview=false' | grep -q 'Ok' || exit 1"]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -78,3 +78,4 @@ volumes:
   postgres_data:
   redis_data:
   osrm_data:
+    external: true
