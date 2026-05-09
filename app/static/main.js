@@ -25,6 +25,7 @@ let map, driverMarker, clientMarker, destMarker;
 let _gRoutePolyline = null;
 let _gRouteShadow = null;
 let _gRouteAbPolyline = null;
+let _gPassedPolyline = null;
 let routeRoadDistanceKm = null;
 let routeInstructions = [], routeCoordinates = [];
 // Turf route line feature (haydovchi uchun snapping; polyline always full route)
@@ -90,6 +91,7 @@ let _rerouteInFlight = false; // single in-flight directions request for reroute
 let _matchInFlight = false;
 let _matchCallCount = 0;
 let _routeRedrawCount = 0;
+let _destOffsetActive = false;
 const _GPS_BUFFER_SIZE = 6;
 const _gpsMatchBuffer = [];
 let _routeInFlight = false;   // global mutex: any drawRoute directions fetch
@@ -773,11 +775,26 @@ function pathLatLngFromLngLatPairs(coordsLL) {
 }
 function setMainRoutePolylineFromDriverCoords() {
     if (!_driverRouteCoords || _driverRouteCoords.length < 2) return;
-    if (!_smoothedRouteCoords || _smoothedCoordsHash !== _routeHash) {
-        _smoothedRouteCoords = _driverRouteCoords;
-        _smoothedCoordsHash = _routeHash;
-        var path = pathLatLngFromLngLatPairs(_smoothedRouteCoords);
-        if (path.length) setGoogleRoutePolyline(path);
+
+    var anchorIdx = Math.max(0, _routeAnchorIdx);
+    var currentHash = _routeHash + '_' + anchorIdx;
+    if (_smoothedCoordsHash === currentHash) return;
+    _smoothedCoordsHash = currentHash;
+
+    // Passed segment: origin → anchor (grey)
+    var passed = _driverRouteCoords.slice(0, anchorIdx + 1);
+    // Remaining segment: anchor → destination (yellow/active)
+    var remaining = _driverRouteCoords.slice(anchorIdx);
+    if (remaining.length < 2) remaining = _driverRouteCoords;
+
+    // Draw remaining route (active - yellow)
+    var activePath = pathLatLngFromLngLatPairs(remaining);
+    if (activePath.length) setGoogleRoutePolyline(activePath);
+
+    // Draw passed route (inactive - grey), if separate polyline exists
+    if (typeof setPassedRoutePolyline === 'function' && passed.length >= 2) {
+        var passedPath = pathLatLngFromLngLatPairs(passed);
+        if (passedPath.length) setPassedRoutePolyline(passedPath);
     }
 }
 function smoothCoords(coords, factor) {
@@ -798,6 +815,25 @@ function smoothCoords(coords, factor) {
     }
     out.push(coords[coords.length - 1]);
     return out;
+}
+function setPassedRoutePolyline(path) {
+    if (!map || !_mapsJsReady() || !path || !path.length) return;
+    if (!_gPassedPolyline) {
+        _gPassedPolyline = new google.maps.Polyline({
+            path: path,
+            map: map,
+            geodesic: false,
+            strokeColor: '#AAAAAA',
+            strokeWeight: 4,
+            strokeOpacity: 0.5,
+            zIndex: 0,
+            lineJoin: 'round',
+            lineCap: 'round'
+        });
+    } else {
+        _gPassedPolyline.setPath(path);
+        _gPassedPolyline.setMap(map);
+    }
 }
 function setGoogleRoutePolyline(path) {
     if (!map || !_mapsJsReady() || !path || !path.length) return;
@@ -831,6 +867,11 @@ function setGoogleRoutePolyline(path) {
         }
         _gRoutePolyline.setPath(path);
         _gRoutePolyline.setMap(map);
+        // Hide passed polyline when new route is drawn
+        if (_gPassedPolyline) {
+            _gPassedPolyline.setMap(null);
+            _gPassedPolyline = null;
+        }
     }
 }
 function setGoogleRouteABPolyline(path) {
@@ -1200,9 +1241,12 @@ function renderLoop() {
                 // distance based on logic position (dLat/dLng), not display
                 var _arrDist = haversineM(dLat, dLng, _arrDstLat, _arrDstLng);
 
-                if (_arrDist < 40 && _arrDist > 0) {
-                    // blend factor: 0 at 40m to 1 at 0m
-                    var _arrBlend = (40 - _arrDist) / 40;
+                // If last segment is unnamed short road, ignore final 80m snap
+                var _effectiveArrivalZone = _destOffsetActive ? 0 : 40;
+
+                if (_arrDist < _effectiveArrivalZone && _arrDist > 0) {
+                    // blend factor: 0 at zone boundary to 1 at 0m
+                    var _arrBlend = (_effectiveArrivalZone - _arrDist) / _effectiveArrivalZone;
 
                     // gentle pull (no teleport)
                     var _alpha = _arrBlend * 0.25; // max 0.25 per tick
@@ -2422,7 +2466,9 @@ function drawRoute(from, to, opts) {
                     return {
                         text: s.text,
                         type: type,
-                        index: idx
+                        index: idx,
+                        name: s.name || "",
+                        distance: s.distance || 0
                     };
                 });
                 routeInstructions.push({
@@ -2432,6 +2478,16 @@ function drawRoute(from, to, opts) {
                 });
             } else {
                 routeInstructions = buildPolylineManeuvers(routeCoordinates);
+            }
+            // Destination offset: if last segment is unnamed and short → stop 80m early
+            _destOffsetActive = false;
+            if (routeInstructions.length >= 2) {
+                var _lastSeg = routeInstructions[routeInstructions.length - 2];
+                var _lastSegNamed = _lastSeg.name && _lastSeg.name.length > 0;
+                var _lastSegShort = _lastSeg.distance > 0 && _lastSeg.distance < 80;
+                if (!_lastSegNamed && _lastSegShort) {
+                    _destOffsetActive = true;
+                }
             }
             _currentInstructionIndex = 0;
             if (!routeCoordinates.length || _driverRouteCoords.length < 2) {
