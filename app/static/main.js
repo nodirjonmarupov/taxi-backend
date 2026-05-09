@@ -1111,10 +1111,10 @@ function renderLoop() {
                         }
 
                         // Snap hysteresis: avoid snap/raw flapping near threshold.
-                        if (!isSnapped && distM < 20) {
+                        if (!isSnapped && distM < 60) {
                             isSnapped = true;
                         }
-                        if (isSnapped && distM > 30) {
+                        if (isSnapped  && distM > 80) {
                             isSnapped = false;
                         }
 
