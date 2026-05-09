@@ -75,7 +75,6 @@ let isSnapped = false;
 let _pendingGps = null;    // queued GPS update received before _driverRouteLine was ready
 let _snapRouteLine = null;  // mirror of full _driverRouteLine (no progressive trim)
 let _offRouteCount = 0;       // consecutive GPS samples past off-route threshold (noise filter)
-let _lastRerouteTime = 0;     // last reroute attempt timestamp (cooldown)
 let _lastForceRerouteAt = 0;
 const FORCE_REROUTE_MIN_INTERVAL_MS = 1500;
 
@@ -90,6 +89,7 @@ let _rerouteInFlight = false; // single in-flight directions request for reroute
 // /match pipeline
 let _matchInFlight = false;
 let _matchCallCount = 0;
+let _routeRedrawCount = 0;
 const _GPS_BUFFER_SIZE = 6;
 const _gpsMatchBuffer = [];
 let _routeInFlight = false;   // global mutex: any drawRoute directions fetch
@@ -621,29 +621,6 @@ function advanceAlongRoute(ancLat, ancLng, startIdx, distM) {
 // degrees before computing the projection dot product.
 // Without this correction, 1째 lon ??84 km at lat 41째 vs 1째 lat ??111 km ??24%
 // projection error ??marker consistently offset from road.
-function snapToRoute(lat, lng) {
-    var coords = routeCoordinates;
-    if (!coords || coords.length < 2) return [lat, lng, 0];
-    var toLL = function(c) { return c && (c.lat != null) ? [c.lat, c.lng] : [c[0], c[1]]; };
-    var cosLat = Math.cos(lat * Math.PI / 180);
-    var best = null, bestIdx = 0, bd = Infinity;
-    for (var i = 0; i < coords.length - 1; i++) {
-        var p1 = toLL(coords[i]), p2 = toLL(coords[i + 1]);
-        var y1 = p1[0], x1 = p1[1], y2 = p2[0], x2 = p2[1];
-        // Scale longitude deltas by cosLat so the dot product is proportional to meters.
-        var dy = y2 - y1;
-        var dx = (x2 - x1) * cosLat;
-        var l2 = dy * dy + dx * dx;
-        if (!l2) continue;
-        var t = Math.max(0, Math.min(1, ((lat - y1) * dy + (lng - x1) * cosLat * dx) / l2));
-        var py = y1 + t * (y2 - y1);
-        var px = x1 + t * (x2 - x1);
-        var d = haversineM(lat, lng, py, px); // metric distance ??correct basis for comparison
-        if (d < bd) { bd = d; best = [py, px]; bestIdx = i; }
-    }
-    if (best && bd < ROUTE_SNAP_MAX_M) return [best[0], best[1], bestIdx];
-    return [lat, lng, 0];
-}
 function getOffsetCenter(lat, lon, bearingDeg, meters) {
     if (bearingDeg == null || isNaN(bearingDeg)) return [lat, lon];
     var R = 6378137;
@@ -1116,6 +1093,9 @@ function renderLoop() {
                         }
                         if (isSnapped  && distM > 80) {
                             isSnapped = false;
+                            // Off-route: use raw GPS, do not snap to wrong road
+                            dLat = tLat;
+                            dLng = tLng;
                         }
 
                         if (isSnapped) {
@@ -1136,10 +1116,8 @@ function renderLoop() {
                                     }
                                 }
                             }
-                        } else {
-                            // use RAW GPS if far
-                            dLng = rawLng;
-                            dLat = rawLat;
+                        } else if (!isSnapped) {
+                            // Already handled by snap exit block above — do not overwrite
                         }
                     }
                 } catch (_) {}
@@ -1444,6 +1422,10 @@ async function fetchClientLocation() {
         }
         CLIENT_LOCATION = { lat: lat, lon: lon };
         ORDER_DATA = data;
+        // Reset match pipeline buffers for new trip
+        _gpsMatchBuffer.length = 0;
+        _matchCallCount = 0;
+        _routeRedrawCount = 0;
         ORDER_DATA.pickup_latitude = lat;
         ORDER_DATA.pickup_longitude = lon;
         ORDER_DATA.status = data.status || 'accepted';
@@ -2303,7 +2285,11 @@ function _applyRouteGeometryToMap(fromLat, fromLng, toLat, toLng) {
         var _pg = _pendingGps; _pendingGps = null;
         updateDriverMarker(_pg.lat, _pg.lng, _pg.heading);
     }
-    setMainRoutePolylineFromDriverCoords();
+    // Redraw route only every 3 GPS updates
+    _routeRedrawCount++;
+    if (_routeRedrawCount % 3 === 0) {
+        setMainRoutePolylineFromDriverCoords();
+    }
     setTurnAndDistFromDriver({ lat: fromLat, lng: fromLng });
     updateNavUI();
 }
@@ -2600,7 +2586,11 @@ function checkOffRoute(lat, lng, speed) {
         } else {
             _offRouteCount = 0;
         }
-        if (_offRouteCount >= 3) { // FIXED: BUG#1
+        // Immediate reroute if very far off route
+        if (distM > 150) {
+            _offRouteCount = 0;
+            tryReroute(lat, lng);
+        } else if (_offRouteCount >= 3) { // FIXED: BUG#1
             _offRouteCount = 0;
             tryReroute(lat, lng);
         }
