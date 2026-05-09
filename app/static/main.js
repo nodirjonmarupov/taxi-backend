@@ -778,7 +778,7 @@ function setMainRoutePolylineFromDriverCoords() {
 
     var anchorIdx = Math.max(0, _routeAnchorIdx);
     var currentHash = _routeHash + '_' + anchorIdx;
-    if (_smoothedCoordsHash === currentHash) return;
+    if (_routeHash && _smoothedCoordsHash === currentHash) return;
     _smoothedCoordsHash = currentHash;
 
     // Passed segment: origin → anchor (grey)
