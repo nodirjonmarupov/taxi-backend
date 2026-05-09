@@ -2423,6 +2423,7 @@ function drawRoute(from, to, opts) {
             }).filter(function(c) {
                 return !isNaN(c[0]) && !isNaN(c[1]) && isValidCoord(c[1], c[0]);
             });
+            console.log('[DRAW] _driverRouteCoords length:', _driverRouteCoords.length, '_routeHash:', _routeHash);
             // Close-the-gap: visually connect route to destination if OSRM ended early.
             // _driverRouteCoords is [lon, lat] order; toLat/toLng are in scope from drawRoute().
             if (_driverRouteCoords.length > 1 && toLat != null && toLng != null && isValidCoord(toLat, toLng)) {
