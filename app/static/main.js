@@ -2469,6 +2469,9 @@ function drawRoute(from, to, opts) {
                     type: -1,
                     index: _driverRouteCoords.length - 1
                 });
+                console.log('[STEPS]', routeInstructions.map(function(s) {
+                    return { name: s.name, distance: s.distance, text: s.text };
+                }));
             } else {
                 routeInstructions = buildPolylineManeuvers(routeCoordinates);
             }
