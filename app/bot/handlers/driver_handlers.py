@@ -683,10 +683,11 @@ async def accept_order(callback: CallbackQuery):
     """Buyurtmani qabul qilish va TAKSOMETR yuborish"""
     try:
         order_id = int(callback.data.split(":")[1])
+        # Do NOT stop timer or clear dispatch here —
+        # only do it AFTER confirming order is still PENDING and we can accept it
+        # stop_driver_timer and clear_dispatch_state moved to after DB check below
 
         from app.services.order_service import stop_driver_timer, clear_dispatch_state
-        stop_driver_timer(order_id)
-        clear_dispatch_state(order_id)
 
         logger.info(f"🎯 Driver {callback.from_user.id} buyurtma {order_id}ni qabul qilmoqda...")
         
@@ -722,6 +723,10 @@ async def accept_order(callback: CallbackQuery):
                 if existing and existing.id != order_id:
                     await callback.answer(get_text(driver_ui_lang, "driver_accept_busy"), show_alert=True)
                     return
+
+                # Now safe to stop timer and clear dispatch — order is being accepted
+                stop_driver_timer(order_id)
+                clear_dispatch_state(order_id)
 
                 order.driver_id = driver.id
                 order.status = OrderStatus.ACCEPTED
