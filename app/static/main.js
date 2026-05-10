@@ -91,7 +91,6 @@ let _rerouteInFlight = false; // single in-flight directions request for reroute
 let _matchInFlight = false;
 let _matchCallCount = 0;
 let _routeRedrawCount = 0;
-let _destOffsetActive = false;
 const _GPS_BUFFER_SIZE = 6;
 const _gpsMatchBuffer = [];
 let _routeInFlight = false;   // global mutex: any drawRoute directions fetch
@@ -1236,8 +1235,7 @@ function renderLoop() {
                 // distance based on logic position (dLat/dLng), not display
                 var _arrDist = haversineM(dLat, dLng, _arrDstLat, _arrDstLng);
 
-                // If last segment is unnamed short road, ignore final 80m snap
-                var _effectiveArrivalZone = _destOffsetActive ? 0 : 40;
+                var _effectiveArrivalZone = 40;
 
                 if (_arrDist < _effectiveArrivalZone && _arrDist > 0) {
                     // blend factor: 0 at zone boundary to 1 at 0m
@@ -2474,16 +2472,6 @@ function drawRoute(from, to, opts) {
                 }));
             } else {
                 routeInstructions = buildPolylineManeuvers(routeCoordinates);
-            }
-            // Destination offset: if last segment is unnamed and short → stop 80m early
-            _destOffsetActive = false;
-            if (routeInstructions.length >= 2) {
-                var _lastSeg = routeInstructions[routeInstructions.length - 2];
-                var _lastSegNamed = _lastSeg.name && _lastSeg.name.length > 0;
-                var _lastSegShort = _lastSeg.distance > 0 && _lastSeg.distance < 80;
-                if (!_lastSegNamed && _lastSegShort) {
-                    _destOffsetActive = true;
-                }
             }
             _currentInstructionIndex = 0;
             if (!routeCoordinates.length || _driverRouteCoords.length < 2) {
