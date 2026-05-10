@@ -2564,9 +2564,13 @@ async function tryReroute(lat, lng, opts = {}) { // FIXED: BUG#2
     const _now = Date.now();
     if (_rerouteInFlight && !opts?.force) return false;
     if (!opts?.force && (_now - __lastRerouteTs < 12000)) return false;
-    if (ORDER_DATA?.destination_latitude != null) {
-        const _distToDest = haversineM(lat, lng, ORDER_DATA.destination_latitude, ORDER_DATA.destination_longitude);
-        if (_distToDest < 150) return false;
+    // Proximity guard: don't reroute when close to current target
+    var _proximityTarget = (appState === 'arriving')
+        ? { lat: ORDER_DATA?.pickup_latitude, lng: ORDER_DATA?.pickup_longitude }
+        : { lat: ORDER_DATA?.destination_latitude, lng: ORDER_DATA?.destination_longitude };
+    if (_proximityTarget.lat != null && _proximityTarget.lng != null) {
+        const _distToTarget = haversineM(lat, lng, _proximityTarget.lat, _proximityTarget.lng);
+        if (_distToTarget < 150) return false;
     }
     // FIXED: dead code from BUG#2 cleanup
     // update reroute tracking
@@ -2578,19 +2582,21 @@ async function tryReroute(lat, lng, opts = {}) { // FIXED: BUG#2
     try {
         resetRouteProgress();
         _snapRouteLine = null;
+        // Use pickup as target when driver is heading to pick up passenger
+        var _rerouteTarget = (appState === 'arriving')
+            ? { lat: ORDER_DATA.pickup_latitude, lng: ORDER_DATA.pickup_longitude }
+            : { lat: ORDER_DATA.destination_latitude, lng: ORDER_DATA.destination_longitude };
+
         const ok = await drawRoute(
             { lat: lat, lng: lng },
-            {
-                lat: ORDER_DATA.destination_latitude,
-                lng: ORDER_DATA.destination_longitude
-            },
+            _rerouteTarget,
             { fromReroute: true }
         );
         if (!ok) {
             fallbackStraightLine(
                 lat, lng,
-                ORDER_DATA.destination_latitude,
-                ORDER_DATA.destination_longitude
+                _rerouteTarget.lat,
+                _rerouteTarget.lng
             );
         }
         return true;
