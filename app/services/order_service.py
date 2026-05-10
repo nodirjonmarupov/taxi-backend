@@ -81,8 +81,6 @@ def stop_driver_timer(order_id: int) -> None:
         task = data.get("task")
         if event:
             event.set()
-        if task and not task.done():
-            task.cancel()
         logger.info(f"Driver timer stopped for order {order_id}")
 
 
@@ -99,8 +97,7 @@ async def _run_driver_accept_timer(
     """15 soniyalik qabul qilish taymeri."""
     key = order_id
     event = asyncio.Event()
-    task = asyncio.current_task()
-    _driver_timers[key] = {"event": event, "task": task}
+    _driver_timers[key] = {"event": event, "task": None}
 
     try:
         for remaining in range(DRIVER_TIMEOUT_SECONDS - DRIVER_TIMER_INTERVAL, 0, -DRIVER_TIMER_INTERVAL):
