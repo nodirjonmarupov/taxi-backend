@@ -137,7 +137,16 @@ async def _run_driver_accept_timer(
                 reply_markup=InlineKeyboardMarkup(inline_keyboard=[]),
             )
         except Exception:
-            pass
+            # edit failed — try to remove keyboard separately
+            try:
+                from aiogram.types import InlineKeyboardMarkup
+                await bot.edit_message_reply_markup(
+                    chat_id=driver_chat_id,
+                    message_id=message_id,
+                    reply_markup=InlineKeyboardMarkup(inline_keyboard=[]),
+                )
+            except Exception:
+                pass
 
         await on_timeout(order_id)
         logger.info(f"Driver timer timeout for order {order_id}")
