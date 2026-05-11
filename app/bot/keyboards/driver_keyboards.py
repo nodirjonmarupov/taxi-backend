@@ -66,3 +66,11 @@ def driver_keyboard_online_with_taximeter(lang: str = "uz") -> ReplyKeyboardMark
         ],
         resize_keyboard=True,
     )
+
+
+def driver_keyboard_online_busy(lang: str = "uz") -> ReplyKeyboardMarkup:
+    """ONLINE + faol buyurtma: faqat Offline tugmasi (taksometr tugmasi yashirilgan)."""
+    return ReplyKeyboardMarkup(
+        keyboard=[[KeyboardButton(text=get_text(lang, "driver_btn_offline"))]],
+        resize_keyboard=True,
+    )
