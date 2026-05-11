@@ -771,6 +771,14 @@ async def accept_order(callback: CallbackQuery):
                     parse_mode="HTML",
                 )
 
+            # Send/update bottom Reply Keyboard with taximeter button
+            # This ensures driver always has the taximeter button regardless of inline state
+            from app.bot.keyboards.driver_keyboards import driver_keyboard_online_with_taximeter
+            await callback.message.answer(
+                get_text(driver_ui_lang, "driver_accept_ok_short"),
+                reply_markup=driver_keyboard_online_with_taximeter(driver_ui_lang),
+            )
+
             logger.info(f"✅ Driver {driver.id} buyurtma {order_id}ni qabul qildi")
 
             await _notify_customer_driver_assigned(
