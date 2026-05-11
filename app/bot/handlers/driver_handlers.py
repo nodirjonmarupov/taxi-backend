@@ -683,10 +683,8 @@ async def accept_order(callback: CallbackQuery):
     """Buyurtmani qabul qilish va TAKSOMETR yuborish"""
     try:
         order_id = int(callback.data.split(":")[1])
-        # Do NOT stop timer or clear dispatch here —
-        # only do it AFTER confirming order is still PENDING and we can accept it
-        # stop_driver_timer and clear_dispatch_state moved to after DB check below
-
+        # Acknowledge Telegram immediately to prevent callback retry (2s, 7s retries)
+        await callback.answer()
         from app.services.order_service import stop_driver_timer, clear_dispatch_state
 
         logger.info(f"🎯 Driver {callback.from_user.id} buyurtma {order_id}ni qabul qilmoqda...")
@@ -696,15 +694,15 @@ async def accept_order(callback: CallbackQuery):
                 user = await UserCRUD.get_by_telegram_id(db, callback.from_user.id)
                 driver_ui_lang = normalize_bot_lang(getattr(user, "language_code", None) or "uz") if user else "uz"
                 if not user:
-                    await callback.answer(get_text("uz", "driver_accept_err"), show_alert=True)
+                    await callback.message.answer(get_text("uz", "driver_accept_err"))
                     return
 
                 driver = await DriverCRUD.get_by_user_id(db, user.id)
                 if not driver:
-                    await callback.answer(get_text(driver_ui_lang, "driver_accept_err"), show_alert=True)
+                    await callback.message.answer(get_text(driver_ui_lang, "driver_accept_err"))
                     return
                 if not getattr(driver, "is_active", True):
-                    await callback.answer(get_text(driver_ui_lang, "driver_accept_deactivated"), show_alert=True)
+                    await callback.message.answer(get_text(driver_ui_lang, "driver_accept_deactivated"))
                     return
 
                 from app.crud.order_crud import OrderCRUD
@@ -712,16 +710,16 @@ async def accept_order(callback: CallbackQuery):
                 order = await OrderCRUD.get_by_id_for_update(db, order_id)
 
                 if not order:
-                    await callback.answer(get_text(driver_ui_lang, "driver_accept_order_missing"), show_alert=True)
+                    await callback.message.answer(get_text(driver_ui_lang, "driver_accept_order_missing"))
                     return
 
                 if order.status != OrderStatus.PENDING:
-                    await callback.answer(get_text(driver_ui_lang, "driver_accept_order_taken"), show_alert=True)
+                    await callback.message.answer(get_text(driver_ui_lang, "driver_accept_order_taken"))
                     return
 
                 existing = await OrderCRUD.get_ongoing_order_for_driver(db, driver.id)
                 if existing and existing.id != order_id:
-                    await callback.answer(get_text(driver_ui_lang, "driver_accept_busy"), show_alert=True)
+                    await callback.message.answer(get_text(driver_ui_lang, "driver_accept_busy"))
                     return
 
                 # Now safe to stop timer and clear dispatch — order is being accepted
@@ -759,13 +757,19 @@ async def accept_order(callback: CallbackQuery):
                     _phone_inserted = True
             accept_text = "\n".join(_lines_out)
 
-            await callback.message.edit_text(
-                accept_text,
-                reply_markup=kb,
-                parse_mode="HTML",
-            )
-
-            await callback.answer(get_text(driver_ui_lang, "driver_accept_ok_short"), show_alert=False)
+            try:
+                await callback.message.edit_text(
+                    accept_text,
+                    reply_markup=kb,
+                    parse_mode="HTML",
+                )
+            except Exception:
+                # edit_text failed (timer already edited it) — send new message instead
+                await callback.message.answer(
+                    accept_text,
+                    reply_markup=kb,
+                    parse_mode="HTML",
+                )
 
             logger.info(f"✅ Driver {driver.id} buyurtma {order_id}ni qabul qildi")
 
