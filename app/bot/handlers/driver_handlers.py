@@ -757,19 +757,17 @@ async def accept_order(callback: CallbackQuery):
                     _phone_inserted = True
             accept_text = "\n".join(_lines_out)
 
+            # Always send a NEW message with taximeter button — never rely on edit_text
+            # edit_text may have been modified by timer, driver may not see old message
             try:
-                await callback.message.edit_text(
-                    accept_text,
-                    reply_markup=kb,
-                    parse_mode="HTML",
-                )
+                await callback.message.edit_reply_markup(reply_markup=None)
             except Exception:
-                # edit_text failed (timer already edited it) — send new message instead
-                await callback.message.answer(
-                    accept_text,
-                    reply_markup=kb,
-                    parse_mode="HTML",
-                )
+                pass
+            await callback.message.answer(
+                accept_text,
+                reply_markup=kb,
+                parse_mode="HTML",
+            )
 
             # Send/update bottom Reply Keyboard with taximeter button
             # This ensures driver always has the taximeter button regardless of inline state
