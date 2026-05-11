@@ -760,7 +760,7 @@ async def accept_order(callback: CallbackQuery):
             # Always send a NEW message with taximeter button — never rely on edit_text
             # edit_text may have been modified by timer, driver may not see old message
             try:
-                await callback.message.edit_reply_markup(reply_markup=None)
+                await callback.message.delete()
             except Exception:
                 pass
             await callback.message.answer(
@@ -773,7 +773,7 @@ async def accept_order(callback: CallbackQuery):
             # This ensures driver always has the taximeter button regardless of inline state
             from app.bot.keyboards.driver_keyboards import driver_keyboard_online_with_taximeter
             await callback.message.answer(
-                get_text(driver_ui_lang, "driver_accept_ok_short"),
+                "🚖",
                 reply_markup=driver_keyboard_online_with_taximeter(driver_ui_lang),
             )
 
