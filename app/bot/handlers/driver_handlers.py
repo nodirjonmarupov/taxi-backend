@@ -30,6 +30,7 @@ from app.bot.keyboards.driver_keyboards import (
     DRIVER_GROUP_INVITE_URL,
     driver_keyboard_already_registered,
     driver_keyboard_full,
+    driver_keyboard_online_busy,
     driver_keyboard_online_with_taximeter,
     driver_keyboard_pending_approval,
 )
@@ -189,6 +190,7 @@ class DriverStates(StatesGroup):
     waiting_for_car_color = State()
     waiting_for_license = State()
     waiting_for_license_photo = State()
+    waiting_for_manual_confirm = State()
 
 
 class PaymeStates(StatesGroup):
@@ -769,12 +771,11 @@ async def accept_order(callback: CallbackQuery):
                 parse_mode="HTML",
             )
 
-            # Send/update bottom Reply Keyboard with taximeter button
-            # This ensures driver always has the taximeter button regardless of inline state
-            from app.bot.keyboards.driver_keyboards import driver_keyboard_online_with_taximeter
+            # Hide manual taximeter from bottom keyboard while driver has an active order.
+            # The order-specific inline taximeter button (sent above) is the correct entry point.
             await callback.message.answer(
                 "🚖",
-                reply_markup=driver_keyboard_online_with_taximeter(driver_ui_lang),
+                reply_markup=driver_keyboard_online_busy(driver_ui_lang),
             )
 
             logger.info(f"✅ Driver {driver.id} buyurtma {order_id}ni qabul qildi")
@@ -989,8 +990,8 @@ async def go_offline(message: Message, lang: str = "uz"):
 
 
 @driver_router.message(F.text.in_(DRIVER_OPEN_TAXIMETER_TEXTS))
-async def open_taximeter_manual(message: Message):
-    """Haydovchi panelidan: qo'lda Order + OrderCRUD + _ensure_trip_state_for_order_start (mavjud taksometr)."""
+async def open_taximeter_manual(message: Message, state: FSMContext):
+    """Haydovchi panelidan: qo'lda safarni boshlashdan oldin tasdiqlash so'raladi."""
     lang = "uz"
     try:
         async with AsyncSessionLocal() as db:
@@ -1038,6 +1039,95 @@ async def open_taximeter_manual(message: Message):
                     )
                 return
 
+        # Race-condition guard: if confirmation is already pending, ignore repeated taps
+        current_state = await state.get_state()
+        if current_state == DriverStates.waiting_for_manual_confirm.state:
+            return
+
+        # Show confirmation inline keyboard — do NOT start trip yet
+        from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+        confirm_kb = InlineKeyboardMarkup(inline_keyboard=[
+            [
+                InlineKeyboardButton(text="✅ Boshlash", callback_data="manual_trip_confirm:yes"),
+                InlineKeyboardButton(text="❌ Bekor qilish", callback_data="manual_trip_confirm:no"),
+            ]
+        ])
+        await message.answer(
+            "Haqiqatan ham manual safarni boshlamoqchimisiz?",
+            reply_markup=confirm_kb,
+        )
+        await state.set_state(DriverStates.waiting_for_manual_confirm)
+
+    except Exception as e:
+        logger.error(f"open_taximeter_manual: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
+        await message.answer(get_text(lang, "driver_err_generic_retry"))
+
+
+@driver_router.callback_query(
+    F.data == "manual_trip_confirm:no",
+    StateFilter(DriverStates.waiting_for_manual_confirm),
+)
+async def manual_trip_cancel(callback: CallbackQuery, state: FSMContext):
+    """Manual safar bekor qilindi — hech narsa yaratilmaydi."""
+    await state.clear()
+    try:
+        await callback.message.delete()
+    except Exception:
+        pass
+    await callback.answer()
+
+
+@driver_router.callback_query(
+    F.data == "manual_trip_confirm:yes",
+    StateFilter(DriverStates.waiting_for_manual_confirm),
+)
+async def manual_trip_start_confirmed(callback: CallbackQuery, state: FSMContext):
+    """Manual safar tasdiqlandi — order yaratish va taksometrni ishga tushirish."""
+    # Clear state immediately to prevent double-tap race
+    await state.clear()
+    try:
+        await callback.message.delete()
+    except Exception:
+        pass
+    await callback.answer()
+
+    lang = "uz"
+    try:
+        async with AsyncSessionLocal() as db:
+            lang = await db_lang_for_telegram(db, callback.from_user.id)
+            user = await UserCRUD.get_by_telegram_id(db, callback.from_user.id)
+            driver_ui_lang = (
+                normalize_bot_lang(getattr(user, "language_code", None) or "uz") if user else "uz"
+            )
+            if not user:
+                await callback.message.answer(get_text(lang, "driver_go_online_err_start"))
+                return
+            driver = await DriverCRUD.get_by_user_id(db, user.id)
+            if not driver:
+                await callback.message.answer(get_text(lang, "driver_go_online_not_driver"))
+                return
+
+            from app.crud.order_crud import OrderCRUD
+
+            # Double-check: no ongoing trip appeared between confirm and yes-tap
+            ongoing = await OrderCRUD.get_ongoing_order_for_driver(db, driver.id)
+            if ongoing:
+                cur_l = str(
+                    ongoing.status.value if hasattr(ongoing.status, "value") else ongoing.status
+                ).lower()
+                if cur_l in ("accepted", "in_progress"):
+                    kb = driver_taximeter_reply_markup(
+                        driver_ui_lang, ongoing.id, driver.id, with_chat=(cur_l == "accepted")
+                    )
+                    await callback.message.answer(
+                        get_text(driver_ui_lang, "driver_manual_taximeter_active", order_id=ongoing.id),
+                        reply_markup=kb,
+                        parse_mode="HTML",
+                    )
+                return
+
             from app.api.routes.webapp import _ensure_trip_state_for_order_start
             from app.schemas.order import OrderCreate
             from app.services.pricing_service import PricingService
@@ -1047,15 +1137,14 @@ async def open_taximeter_manual(message: Message):
             try:
                 cust_uid = await _manual_order_customer_user_id(db, driver.user_id)
             except ValueError as ve:
-                code = str(ve)
-                logger.error("open_taximeter_manual customer user: %s", code)
-                await message.answer(get_text(lang, "driver_err_generic_retry"))
+                logger.error("manual_trip_start_confirmed customer user: %s", ve)
+                await callback.message.answer(get_text(lang, "driver_err_generic_retry"))
                 return
 
             try:
                 tariff = await get_settings(db)
             except SettingsLoadError:
-                await message.answer(get_text(lang, "driver_err_generic_retry"))
+                await callback.message.answer(get_text(lang, "driver_err_generic_retry"))
                 return
 
             lat = getattr(driver, "current_latitude", None)
@@ -1086,7 +1175,7 @@ async def open_taximeter_manual(message: Message):
             order_acc = await OrderCRUD.get_by_id(db, new_order.id)
             if order_acc:
                 await _notify_customer_driver_assigned(
-                    message.bot, db, order=order_acc, driver=driver, driver_user=user
+                    callback.bot, db, order=order_acc, driver=driver, driver_user=user
                 )
             await OrderCRUD.update_status(
                 db,
@@ -1108,17 +1197,16 @@ async def open_taximeter_manual(message: Message):
             kb = driver_taximeter_reply_markup(
                 driver_ui_lang, new_order.id, driver.id, with_chat=False
             )
-            await message.answer(
+            await callback.message.answer(
                 get_text(driver_ui_lang, "driver_manual_taximeter_ready", order_id=new_order.id),
                 reply_markup=kb,
                 parse_mode="HTML",
             )
     except Exception as e:
-        logger.error(f"open_taximeter_manual: {e}")
+        logger.error(f"manual_trip_start_confirmed: {e}")
         import traceback
-
         logger.error(traceback.format_exc())
-        await message.answer(get_text(lang, "driver_err_generic_retry"))
+        await callback.message.answer(get_text(lang, "driver_err_generic_retry"))
 
 
 # ============================================
@@ -1731,6 +1819,15 @@ async def finish_order(callback: CallbackQuery):
                     logger.error(f"Mijozga yakuniy xabar yuborishda xato: {e}")
 
             await callback.answer(get_text(fin_lang, "trip_completed_check"))
+
+            # Restore full online keyboard — manual taximeter button re-appears after trip ends
+            try:
+                await callback.message.answer(
+                    "🟢",
+                    reply_markup=driver_keyboard_online_with_taximeter(fin_lang),
+                )
+            except Exception as _kb_err:
+                logger.warning("finish_order: keyboard restore failed: %s", _kb_err)
 
     except Exception as e:
         logger.error(f"❌ Safarni yakunlashda xato: {e}")
