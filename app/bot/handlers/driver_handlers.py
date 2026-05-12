@@ -1827,14 +1827,21 @@ async def finish_order(callback: CallbackQuery):
                 )
 
                 driver_chat_id = int(callback.from_user.id)
+                _os_fin = order.status
+                _os_fin_s = (
+                    _os_fin.value if hasattr(_os_fin, "value") else str(_os_fin)
+                ) or ""
                 await force_restore_driver_online_reply_keyboard(
                     telegram_bot,
                     driver_chat_id,
                     fin_lang,
                     context=f"finish_order_callback order_id={order_id}",
+                    order_id=order_id,
+                    order_status=_os_fin_s,
+                    request_path="POST finish_order_callback",
                 )
             except Exception as _kb_err:
-                logger.warning("finish_order: keyboard restore failed: %s", _kb_err)
+                logger.exception("finish_order: keyboard restore failed: %s", _kb_err)
 
     except Exception as e:
         logger.error(f"❌ Safarni yakunlashda xato: {e}")
