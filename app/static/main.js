@@ -421,7 +421,7 @@ let lastHeading = 0;
 let _needsTripRouteRestore = false;
 let lastSentLocation = null;
 let lastSentTime = 0;
-const MIN_DISTANCE_M = 15;
+const MIN_DISTANCE_M = 25;
 const ROUTE_SNAP_MAX_M = 20;
 const HEADING_BUFFER_MAX = 8;
 const HEADING_BUFFER_RESET_DEG = 30;
@@ -2105,7 +2105,7 @@ function updateDriverMarker(lat, lng, heading) {
         // /match pipeline
         _pushGpsBuffer(lat, lng);
         _matchCallCount++;
-        if (_matchCallCount % 3 === 0) {
+        if (_matchCallCount % 5 === 0) {
             _fetchMapMatch(); // fire-and-forget, intentionally not awaited
         }
         spd = speedKmh;
