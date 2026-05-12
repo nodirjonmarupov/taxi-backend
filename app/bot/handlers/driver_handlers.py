@@ -214,6 +214,9 @@ async def handle_webapp_data(message: Message):
         data = json.loads(data_str)
         if data.get("status") == "finished" and data.get("order_id"):
             logger.info(f"📱 WebApp sendData: Safar #{data.get('order_id')} yakunlandi (xabarlar API orqali yuboriladi)")
+            # #region agent log
+            with open('debug-4d6510.log','a') as _lf: import json as _j, time as _t; _lf.write(_j.dumps({'sessionId':'4d6510','timestamp':int(_t.time()*1000),'location':'driver_handlers.py:handle_webapp_data','hypothesisId':'D','message':'web_app_data finished received','data':{'order_id':data.get('order_id'),'tg_user':message.from_user.id if message.from_user else None}})+'\n')
+            # #endregion
     except Exception as e:
         logger.error(f"WebApp data handler xato: {e}")
 
@@ -1605,6 +1608,9 @@ async def finish_order(callback: CallbackQuery):
     """Safarni yakunlash — yakuniy narx har doim serverda qayta hisoblanadi (WebApp bilan bir xil)."""
     try:
         order_id = int(callback.data.split(":")[1])
+        # #region agent log
+        with open('debug-4d6510.log','a') as _lf: import json as _j, time as _t; _lf.write(_j.dumps({'sessionId':'4d6510','timestamp':int(_t.time()*1000),'location':'driver_handlers.py:finish_order_ENTRY','hypothesisId':'E','message':'finish_order callback fired','data':{'order_id':order_id,'tg_user':callback.from_user.id}})+'\n')
+        # #endregion
         
         async with AsyncSessionLocal() as db:
             from app.crud.order_crud import OrderCRUD
