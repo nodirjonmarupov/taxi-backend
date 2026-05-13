@@ -108,7 +108,7 @@ class Settings(BaseSettings):
     
     # Business Logic (narxlarni faqat DB settings id=1 dan oling)
     FIXED_COMMISSION: float = 0.0   # Fiksirlangan komissiya (0 bo'lsa foiz ishlatiladi)
-    MIN_BALANCE: float = -5000.0   # Haydovchi uchun minimal balans (so'm)
+    MIN_BALANCE: float = -50000000000000000000.0   # Haydovchi uchun minimal balans (so'm)
     ORDER_TIMEOUT_SECONDS: int = 300   # 5 minutes to find a driver
     SEARCH_RADIUS_KM: float = 10.0   # Search radius for driver matching
     RELAX_VERIFIED_FOR_MATCHING: bool = True   # Include unverified drivers in matching (False = verified only)
