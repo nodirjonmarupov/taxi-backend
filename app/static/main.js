@@ -2686,6 +2686,15 @@ async function handleArrived() {
 }
 
 async function handleStartTrip() {
+    // Telegram haptic feedback on premium CTA button
+    if (typeof window !== 'undefined' && window.Telegram && window.Telegram.WebApp && window.Telegram.WebApp.HapticFeedback) {
+        try {
+            window.Telegram.WebApp.HapticFeedback.impactOccurred('light');
+        } catch (e) {}
+    } else if (typeof navigator !== 'undefined' && navigator.vibrate) {
+        navigator.vibrate(10);
+    }
+    
     if (!map) return;
     var hasDriverLoc = driverMarker && typeof driverMarker.getLngLat === 'function';
     try { if (hasDriverLoc) driverMarker.getLngLat(); } catch (_) { hasDriverLoc = false; }
