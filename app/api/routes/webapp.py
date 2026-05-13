@@ -593,9 +593,6 @@ async def update_order_status(
             try:
                 from app.core.database import AsyncSessionLocal as _ASL_idem
                 from app.bot.telegram_bot import bot as _bot_idem
-                from app.bot.driver_reply_keyboard_restore import (
-                    force_restore_driver_online_reply_keyboard,
-                )
 
                 async with _ASL_idem() as _s_idem:
                     _d_idem = await DriverCRUD.get_by_id(_s_idem, driver_id)
@@ -609,14 +606,11 @@ async def update_order_status(
                         getattr(_du_idem, "language_code", None) or "uz" if _du_idem else "uz"
                     )
                 if _tg_idem:
-                    await force_restore_driver_online_reply_keyboard(
-                        _bot_idem,
+                    from app.bot.keyboards.driver_keyboards import driver_keyboard_online_with_taximeter as _kb_idem
+                    await _bot_idem.send_message(
                         int(_tg_idem),
-                        _lang_idem,
-                        context=f"webapp_idempotent_complete order_id={order_id}",
-                        order_id=order_id,
-                        order_status=str(cur_status),
-                        request_path=f"POST /api/webapp/order/{order_id}/status",
+                        "🟢",
+                        reply_markup=_kb_idem(_lang_idem),
                     )
             except Exception as _idem_kb_exc:
                 logger.exception(
@@ -736,9 +730,6 @@ async def update_order_status(
             from app.bot.keyboards.main_menu import get_main_keyboard
             from app.core.database import AsyncSessionLocal
             from app.bot.telegram_bot import bot, dp
-            from app.bot.driver_reply_keyboard_restore import (
-                force_restore_driver_online_reply_keyboard,
-            )
 
             # Telegram ID va til ma'lumotlarini ALOHIDA sessiyada olamiz.
             # Sabab: request db update_status ichida commit qilingan; bir xil
@@ -886,9 +877,6 @@ async def update_order_status(
             try:
                 from app.core.database import AsyncSessionLocal
                 from app.bot.telegram_bot import bot as _bot
-                from app.bot.driver_reply_keyboard_restore import (
-                    force_restore_driver_online_reply_keyboard,
-                )
 
                 async with AsyncSessionLocal() as _cs:
                     _drv = await DriverCRUD.get_by_id(_cs, updated_order.driver_id) if updated_order.driver_id else None
@@ -898,14 +886,11 @@ async def update_order_status(
                 if _drv_tg:
                     _cst = updated_order.status
                     _cst_s = (_cst.value if hasattr(_cst, "value") else str(_cst)) or ""
-                    await force_restore_driver_online_reply_keyboard(
-                        _bot,
+                    from app.bot.keyboards.driver_keyboards import driver_keyboard_online_with_taximeter as _kb_cancel
+                    await _bot.send_message(
                         int(_drv_tg),
-                        _drv_lang,
-                        context=f"webapp_order_cancel order_id={order_id}",
-                        order_id=order_id,
-                        order_status=_cst_s,
-                        request_path=f"POST /api/webapp/order/{order_id}/status",
+                        "🟢",
+                        reply_markup=_kb_cancel(_drv_lang),
                     )
             except Exception as _ex:
                 logger.warning("webapp cancel: keyboard restore failed: %s", _ex)
