@@ -402,6 +402,11 @@ async def driving_directions(
             )
             resp = await client.get(osrm_url)
             data = resp.json()
+            # Fallback to public OSRM if self-hosted returns no route
+            if data.get("code") != "Ok":
+                public_url = osrm_url.replace(OSRM_BASE_URL, "https://router.project-osrm.org")
+                r2 = await client.get(public_url)
+                data = r2.json()
     except Exception as e:
         logger.error("driving_directions httpx: %s", e)
         return {"ok": False, "error": "no_route"}
@@ -450,6 +455,7 @@ async def driving_directions(
                         "text": text,
                         "modifier": modifier,
                         "distance": float(st.get("distance") or 0),
+                        "name": (st.get("name") or "").strip(),
                     }
                 )
             except (TypeError, ValueError):
@@ -583,6 +589,41 @@ async def update_order_status(
             if r_clean is not None:
                 delete_trip_state(r_clean, order_id)
             logger.info(f"📱 WebApp: Order {order_id} allaqachon completed — idempotent javob")
+            # Klaviatura: avvalgi so'rovda restore o'tkazib yuborilgan bo'lishi mumkin — har doim tiklash
+            try:
+                from app.core.database import AsyncSessionLocal as _ASL_idem
+                from app.bot.telegram_bot import bot as _bot_idem
+                from app.bot.driver_reply_keyboard_restore import (
+                    force_restore_driver_online_reply_keyboard,
+                )
+
+                async with _ASL_idem() as _s_idem:
+                    _d_idem = await DriverCRUD.get_by_id(_s_idem, driver_id)
+                    _du_idem = (
+                        await UserCRUD.get_by_id(_s_idem, _d_idem.user_id)
+                        if (_d_idem and _d_idem.user_id)
+                        else None
+                    )
+                    _tg_idem = getattr(_du_idem, "telegram_id", None) if _du_idem else None
+                    _lang_idem = (
+                        getattr(_du_idem, "language_code", None) or "uz" if _du_idem else "uz"
+                    )
+                if _tg_idem:
+                    await force_restore_driver_online_reply_keyboard(
+                        _bot_idem,
+                        int(_tg_idem),
+                        _lang_idem,
+                        context=f"webapp_idempotent_complete order_id={order_id}",
+                        order_id=order_id,
+                        order_status=str(cur_status),
+                        request_path=f"POST /api/webapp/order/{order_id}/status",
+                    )
+            except Exception as _idem_kb_exc:
+                logger.exception(
+                    "webapp idempotent complete: keyboard restore failed order=%s: %s",
+                    order_id,
+                    _idem_kb_exc,
+                )
             return {"success": True, "status": "completed", "idempotent": True}
 
         status_map = {
@@ -694,6 +735,10 @@ async def update_order_status(
             from aiogram.fsm.context import FSMContext
             from app.bot.keyboards.main_menu import get_main_keyboard
             from app.core.database import AsyncSessionLocal
+            from app.bot.telegram_bot import bot, dp
+            from app.bot.driver_reply_keyboard_restore import (
+                force_restore_driver_online_reply_keyboard,
+            )
 
             # Telegram ID va til ma'lumotlarini ALOHIDA sessiyada olamiz.
             # Sabab: request db update_status ichida commit qilingan; bir xil
@@ -715,12 +760,17 @@ async def update_order_status(
                 user_lang = getattr(_user, "language_code", None) or "uz" if _user else "uz"
                 driver_lang = getattr(_driver_user, "language_code", None) or "uz" if _driver_user else "uz"
 
+            _ost = updated_order.status
+            order_status_str = (
+                _ost.value if hasattr(_ost, "value") else str(_ost)
+            ) or ""
+            req_path = f"POST /api/webapp/order/{order_id}/status"
+
             # Commission o'z sessiyasida ishlaydi — request db uzatilmaydi
             bonus_info = await deduct_commission_on_trip_complete(updated_order)
 
             # Mijoz va haydovchiga xabar - use plain vars only (no ORM access after commit)
             try:
-                from decimal import Decimal as _Dec
                 final_price_val = int(getattr(updated_order, "final_price", None) or 0)
                 dist_km = float(getattr(updated_order, "distance_km", None) or 0)
                 dist_val = f"{dist_km:.1f}" if dist_km else "0"
@@ -766,7 +816,6 @@ async def update_order_status(
                         f"📉 Kom: <b>-{_fmt(commission_val)} so'm</b>"
                     )
 
-                from app.bot.telegram_bot import bot, dp
                 sent_user = False
                 sent_driver = False
                 user_main_menu_sent = False
@@ -805,7 +854,7 @@ async def update_order_status(
                         await bot.send_message(driver_telegram_id, msg_driver, parse_mode="HTML")
                         sent_driver = True
                     except Exception as ex:
-                        logger.warning(f"Haydovchiga xabar yuborishda xato: {ex}")
+                        logger.warning(f"Haydovchiga billing xabar yuborishda xato: {ex}")
 
                 if sent_user or sent_driver:
                     logger.info(
@@ -814,6 +863,52 @@ async def update_order_status(
                     )
             except Exception as ex:
                 logger.warning(f"Xabar yuborishda xato: {ex}")
+
+            # Reply klaviatura: bildirishnomalar xatosi bo'lsa ham har doim tiklash
+            if driver_telegram_id:
+                try:
+                    from app.bot.keyboards.driver_keyboards import driver_keyboard_online_with_taximeter
+                    await bot.send_message(
+                        int(driver_telegram_id),
+                        "🟢",
+                        reply_markup=driver_keyboard_online_with_taximeter(driver_lang),
+                    )
+                    logger.info("driver_reply_kb: keyboard restored for driver chat_id=%s order=%s", driver_telegram_id, order_id)
+                except Exception as _kb_err:
+                    logger.exception(
+                        "Haydovchiga keyboard restore xato order=%s err=%s",
+                        order_id, _kb_err,
+                    )
+
+        # If order is cancelled via webapp (driver cancelled accepted/in_progress trip),
+        # restore the driver's full online keyboard with manual taximeter button.
+        if mapped_status == OrderStatus.CANCELLED and updated_order:
+            try:
+                from app.core.database import AsyncSessionLocal
+                from app.bot.telegram_bot import bot as _bot
+                from app.bot.driver_reply_keyboard_restore import (
+                    force_restore_driver_online_reply_keyboard,
+                )
+
+                async with AsyncSessionLocal() as _cs:
+                    _drv = await DriverCRUD.get_by_id(_cs, updated_order.driver_id) if updated_order.driver_id else None
+                    _drv_user = await UserCRUD.get_by_id(_cs, _drv.user_id) if (_drv and _drv.user_id) else None
+                    _drv_tg = getattr(_drv_user, "telegram_id", None) if _drv_user else None
+                    _drv_lang = getattr(_drv_user, "language_code", None) or "uz" if _drv_user else "uz"
+                if _drv_tg:
+                    _cst = updated_order.status
+                    _cst_s = (_cst.value if hasattr(_cst, "value") else str(_cst)) or ""
+                    await force_restore_driver_online_reply_keyboard(
+                        _bot,
+                        int(_drv_tg),
+                        _drv_lang,
+                        context=f"webapp_order_cancel order_id={order_id}",
+                        order_id=order_id,
+                        order_status=_cst_s,
+                        request_path=f"POST /api/webapp/order/{order_id}/status",
+                    )
+            except Exception as _ex:
+                logger.warning("webapp cancel: keyboard restore failed: %s", _ex)
 
         return {"success": True, "status": str(mapped_status.value if hasattr(mapped_status, 'value') else mapped_status)}
     except HTTPException:

@@ -19,7 +19,7 @@ from app.models.order import Order
 logger = get_logger(__name__)
 
 FIXED_COMMISSION = Decimal(str(getattr(config, "FIXED_COMMISSION", 0.0)))
-MIN_BALANCE = Decimal(str(getattr(config, "MIN_BALANCE", -5000.0)))
+MIN_BALANCE = Decimal(str(getattr(config, "MIN_BALANCE", -9999999.0)))
 
 def _to_dec(val) -> Decimal:
     """Har qanday turdagi qiymatni Decimal ga o'girish."""
