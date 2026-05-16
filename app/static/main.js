@@ -649,7 +649,12 @@ function initGoogleMap(initialLat, initialLng) {
         disableDoubleClickZoom: false,
         scrollwheel: true,
         clickableIcons: false,
-        mapTypeId: 'roadmap'
+        mapTypeId: 'roadmap',
+        renderingType: google.maps.RenderingType.VECTOR,
+        tilt: 45,
+        heading: 0,
+        isFractionalZoomEnabled: true,
+        headingInteractionEnabled: true
     });
     if (!_zoomInitialized) {
         try { map.setZoom(17); } catch (_) {}
@@ -686,9 +691,9 @@ function initGoogleMap(initialLat, initialLng) {
         });
     } catch (e) { console.warn('map.setOptions(styles) failed', e); }
     google.maps.event.addListenerOnce(map, 'tilesloaded', function() {
-        // setTilt removed: not compatible with RASTER mode
+        try { map.setTilt(45); } catch (e) { console.warn('map.setTilt failed (tilesloaded)', e); }
     });
-    // setTilt removed: not compatible with RASTER mode
+    try { map.setTilt(45); } catch (e) { console.warn('map.setTilt failed (init)', e); }
     return map;
 }
 function mapResize() {
